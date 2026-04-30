@@ -1,0 +1,34 @@
+# gmux 配置文件
+# 复制此文件为 gmux.toml 并填入实际值
+# 也可以运行 `gmux init` 进入交互式初始化向导
+#
+# 配置文件查找顺序：
+#   1. $GMUX_CONFIG 环境变量指定的路径
+#   2. ./gmux.toml（当前目录）
+#   3. ~/.config/gmux/gmux.toml
+
+[gitlab]
+# GitLab 服务器地址（必填）
+host = ""
+# GitLab API Token（必填）
+token = ""
+
+[project]
+# 本地项目根目录，脚本会扫描该目录下所有 Git 仓库（必填）
+root_dir = ""
+# 合并分支中间名（必填）
+# 例如设为 "henry"，则合并分支名为 uat_henry_meger
+# 设为 "PROJECT_NAME" 则使用项目名称作为中间名
+merge_branch_middle = ""
+# 环境分支列表（可选，默认 ["uat", "test", "stage", "pre_prod"]）
+env_branches = ["uat", "test", "stage", "pre_prod"]
+
+# MR 分支映射（可选）
+# 格式：源分支 = "目标分支"
+# 未配置时根据 env_branches 和 merge_branch_middle 自动生成
+# [branch_map]
+# "test_henry_meger" = "test"
+# "uat_henry_meger" = "uat"
+# "stage_henry_meger" = "stage"
+# "pre_prod_henry_meger" = "pre_prod"
+# "pre_prod" = "master"

@@ -1,0 +1,41 @@
+# gmux 配置文件
+# 复制此文件为 gmux.conf 并填入实际值
+# 也可以不创建此文件，首次运行 gmux 时会进入交互式初始化向导
+#
+# 配置文件查找顺序：
+#   1. $GMUX_CONFIG 环境变量指定的路径
+#   2. ./gmux.conf（当前目录）
+#   3. ~/.config/gmux/gmux.conf
+
+# ---------- GitLab 配置 ----------
+# GitLab 服务器地址（必填）
+GITLAB_HOST=""
+
+# GitLab API Token（必填）
+PRIVATE_TOKEN=""
+
+# ---------- 本地项目配置 ----------
+# 本地项目根目录，脚本会扫描该目录下所有 Git 仓库（必填）
+PROJECTS_ROOT_DIR=""
+
+# 合并分支中间名（必填）
+# 例如设为 "henry"，则合并分支名为 uat_henry_meger
+# 设为 "PROJECT_NAME" 则使用项目名称作为中间名
+MERGE_BRANCH_MIDDLE=""
+
+# ---------- 环境分支 ----------
+# 环境分支列表，用于同步和合并操作
+# 默认值为 uat test stage pre_prod
+ENV_BRANCHES=(uat test stage pre_prod)
+
+# ---------- MR 分支映射 ----------
+# 格式：源分支 -> 目标分支
+# 取消注释并修改以覆盖默认映射
+# 默认映射根据 ENV_BRANCHES 和 MERGE_BRANCH_MIDDLE 自动生成
+# declare -A BRANCH_MAP=(
+#   ["test_henry_meger"]="test"
+#   ["uat_henry_meger"]="uat"
+#   ["stage_henry_meger"]="stage"
+#   ["pre_prod_henry_meger"]="pre_prod"
+#   ["pre_prod"]="master"
+# )

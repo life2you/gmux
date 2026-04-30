@@ -1,0 +1,9 @@
+# 实际配置文件（含敏感信息，勿提交）
+gmux.conf
+gmux.toml
+
+# Rust 构建产物
+/target
+
+# 原始 Bash 脚本
+gmux-1
