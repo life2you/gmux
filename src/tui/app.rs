@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::git;
 use crate::gitlab::GitLabClient;
 use crate::project::{self, Project};
+use crate::tui::checklist::{ChecklistAction, ChecklistState};
 use crate::tui::menu::{MenuAction, MenuState};
 
 pub struct App {
@@ -27,6 +28,12 @@ enum Page {
     SourceBranch {
         project_idx: usize,
         operation: LocalOp,
+    },
+    TargetBranchMulti {
+        project_idx: usize,
+        source_branch: String,
+        state: ChecklistState,
+        targets: Vec<String>,
     },
     TargetBranch {
         project_idx: usize,
@@ -56,6 +63,7 @@ enum LocalOp {
     Sync,
     MergeAll,
     MergeFixed,
+    MergeCustom,
     MergeSingle,
 }
 
@@ -108,7 +116,7 @@ impl App {
         let mut page_stack: Vec<Page> = vec![Page::MainMenu];
 
         loop {
-            let current_page = match page_stack.last() {
+            let current_page = match page_stack.last_mut() {
                 Some(p) => p,
                 None => break,
             };
@@ -174,6 +182,16 @@ impl App {
                     let action = self.show_source_branch(terminal, pidx)?;
                     match action {
                         Some(BranchAction::Select(branch)) => match op {
+                            LocalOp::MergeCustom => match self
+                                .target_branch_multi_page(pidx, branch.clone())
+                            {
+                                Ok(page) => page_stack.push(page),
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(false, format!("读取目标分支失败: {err:#}"))],
+                                    });
+                                }
+                            },
                             LocalOp::MergeSingle => {
                                 page_stack.push(Page::TargetBranch {
                                     project_idx: pidx,
@@ -195,6 +213,37 @@ impl App {
                             page_stack.pop();
                         }
                         Some(BranchAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::TargetBranchMulti {
+                    project_idx,
+                    source_branch,
+                    state,
+                    targets,
+                } => {
+                    let pidx = *project_idx;
+                    let source = source_branch.clone();
+                    let target_options = targets.clone();
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(ChecklistAction::Submit(indexes)) => {
+                            let selected_targets: Vec<String> = indexes
+                                .into_iter()
+                                .filter_map(|index| target_options.get(index).cloned())
+                                .collect();
+                            page_stack.push(Page::ExecutionPreview {
+                                plan: ExecutionPlan::Merge {
+                                    project_idx: pidx,
+                                    source_branch: source,
+                                    targets: selected_targets,
+                                },
+                            });
+                        }
+                        Some(ChecklistAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ChecklistAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -237,12 +286,8 @@ impl App {
                         None => {}
                     }
                 }
-                Page::ExecuteResult { .. } | Page::MrResult { .. } => {
-                    let lines = match page_stack.last().unwrap() {
-                        Page::ExecuteResult { lines } => lines.clone(),
-                        Page::MrResult { lines } => lines.clone(),
-                        _ => unreachable!(),
-                    };
+                Page::ExecuteResult { lines } | Page::MrResult { lines } => {
+                    let lines = lines.clone();
                     let action = self.show_results(terminal, &lines)?;
                     match action {
                         Some(ResultAction::Back) => {
@@ -252,6 +297,7 @@ impl App {
                             while matches!(
                                 page_stack.last(),
                                 Some(Page::ExecutionPreview { .. })
+                                    | Some(Page::TargetBranchMulti { .. })
                                     | Some(Page::TargetBranch { .. })
                                     | Some(Page::SourceBranch { .. })
                                     | Some(Page::LocalOperation { .. })
@@ -426,12 +472,14 @@ impl App {
                 "将指定分支合并到 {} 个目标合并分支",
                 env_count.saturating_sub(1)
             ),
+            "自定义选择多个目标合并分支".to_string(),
             "将指定分支合并到单个目标合并分支".to_string(),
         ];
         let details = vec![
             vec!["依次更新各环境分支，再同步到对应合并分支并 push。".to_string()],
             vec!["从本地分支列表中选择源分支，再合并到所有目标合并分支并分别 push。".to_string()],
             vec!["从本地分支列表中选择源分支，合并到除最后一个以外的目标合并分支。".to_string()],
+            vec!["从目标分支列表中手动勾选多个环境分支，适合灰度或局部回合并。".to_string()],
             vec!["先选择源分支，再选择一个目标合并分支进行 merge + push。".to_string()],
         ];
 
@@ -445,13 +493,54 @@ impl App {
                     MenuAction::Select(0) => Some(LocalOpAction::Select(LocalOp::Sync)),
                     MenuAction::Select(1) => Some(LocalOpAction::Select(LocalOp::MergeAll)),
                     MenuAction::Select(2) => Some(LocalOpAction::Select(LocalOp::MergeFixed)),
-                    MenuAction::Select(3) => Some(LocalOpAction::Select(LocalOp::MergeSingle)),
+                    MenuAction::Select(3) => Some(LocalOpAction::Select(LocalOp::MergeCustom)),
+                    MenuAction::Select(4) => Some(LocalOpAction::Select(LocalOp::MergeSingle)),
                     MenuAction::Back => Some(LocalOpAction::Back),
                     MenuAction::Quit => Some(LocalOpAction::Quit),
                     _ => None,
                 });
             }
         }
+    }
+
+    fn target_branch_multi_page(&self, project_idx: usize, source_branch: String) -> Result<Page> {
+        let project = &self.projects[project_idx];
+        let target_options = project::get_target_merge_branches(&self.config, &project.name);
+        if target_options.is_empty() {
+            return Ok(Page::ExecuteResult {
+                lines: vec![(
+                    false,
+                    format!("项目 {} 没有可用的目标合并分支", project.name),
+                )],
+            });
+        }
+
+        let targets: Vec<String> = target_options
+            .iter()
+            .map(|(_, target)| target.clone())
+            .collect();
+        let details: Vec<Vec<String>> = target_options
+            .iter()
+            .map(|(env, target)| {
+                vec![
+                    format!("环境分支: {env}"),
+                    format!("目标合并分支: {target}"),
+                    format!("源分支: {source_branch}"),
+                ]
+            })
+            .collect();
+
+        Ok(Page::TargetBranchMulti {
+            project_idx,
+            source_branch,
+            targets: targets.clone(),
+            state: ChecklistState::new(
+                "gmux / 目标分支多选",
+                "空格勾选多个目标分支，Enter 进入执行预览",
+                targets,
+            )
+            .with_details(details),
+        })
     }
 
     fn show_source_branch(
@@ -836,7 +925,7 @@ impl App {
                     .map(|(_, branch)| branch)
                     .collect()
             }
-            LocalOp::MergeSingle | LocalOp::Sync => Vec::new(),
+            LocalOp::MergeCustom | LocalOp::MergeSingle | LocalOp::Sync => Vec::new(),
         }
     }
 
