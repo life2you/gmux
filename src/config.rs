@@ -85,6 +85,13 @@ impl Config {
         None
     }
 
+    fn default_global_config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("gmux")
+            .join("gmux.toml")
+    }
+
     fn ensure_branch_map(&mut self) {
         if self.branch_map.is_empty() {
             self.branch_map = Self::generate_default_branch_map(
@@ -194,20 +201,17 @@ impl Config {
         println!("\n\x1b[0;36m配置文件保存位置：\x1b[0m");
         println!("  1. ./gmux.toml（当前目录）");
         println!("  2. ~/.config/gmux/gmux.toml");
-        print!("请选择 [1/2]（默认 1）: ");
+        print!("请选择 [1/2]（默认 2）: ");
         io::stdout().flush()?;
 
         let mut choice = String::new();
         io::stdin().read_line(&mut choice)?;
         let choice = choice.trim();
 
-        let save_path = if choice == "2" {
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("gmux")
-                .join("gmux.toml")
-        } else {
+        let save_path = if choice == "1" {
             PathBuf::from("./gmux.toml")
+        } else {
+            Self::default_global_config_path()
         };
 
         config.save(&save_path)?;
