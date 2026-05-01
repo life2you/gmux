@@ -6,6 +6,7 @@
 #   1. $GMUX_CONFIG 环境变量指定的路径
 #   2. ./gmux.toml（当前目录）
 #   3. ~/.config/gmux/gmux.toml
+#   4. ~/Library/Application Support/gmux/gmux.toml（兼容旧 macOS 路径）
 # 初始化向导默认会保存到 ~/.config/gmux/gmux.toml
 
 [gitlab]

@@ -75,17 +75,37 @@ impl Config {
         }
 
         // 3. ~/.config/gmux/gmux.toml
-        if let Some(config_dir) = dirs::config_dir() {
-            let global = config_dir.join("gmux").join("gmux.toml");
-            if global.is_file() {
-                return Some(global);
-            }
+        let xdg = Self::xdg_config_path();
+        if xdg.is_file() {
+            return Some(xdg);
+        }
+
+        // 4. Legacy macOS path: ~/Library/Application Support/gmux/gmux.toml
+        let legacy = Self::legacy_global_config_path();
+        if legacy.is_file() {
+            return Some(legacy);
         }
 
         None
     }
 
     fn default_global_config_path() -> PathBuf {
+        Self::xdg_config_path()
+    }
+
+    fn xdg_config_path() -> PathBuf {
+        if let Ok(config_home) = std::env::var("XDG_CONFIG_HOME") {
+            return PathBuf::from(config_home).join("gmux").join("gmux.toml");
+        }
+
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+            .join("gmux")
+            .join("gmux.toml")
+    }
+
+    fn legacy_global_config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("gmux")
