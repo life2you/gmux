@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 
 use crate::config::Config;
@@ -21,13 +21,34 @@ pub struct App {
 enum Page {
     MainMenu,
     ProjectSelect,
-    LocalOperation { project_idx: usize },
-    SourceBranch { project_idx: usize, operation: LocalOp },
-    ExecuteResult { lines: Vec<(bool, String)> },
+    LocalOperation {
+        project_idx: usize,
+    },
+    SourceBranch {
+        project_idx: usize,
+        operation: LocalOp,
+    },
+    TargetBranch {
+        project_idx: usize,
+        source_branch: String,
+    },
+    ExecutionPreview {
+        plan: ExecutionPlan,
+    },
+    ExecuteResult {
+        lines: Vec<(bool, String)>,
+    },
     MrMenu,
-    GitLabProjectSelect { mr_mode: MrMode },
-    BranchMapSelect { project_id: u64, project_name: String },
-    MrResult { lines: Vec<(bool, String)> },
+    GitLabProjectSelect {
+        mr_mode: MrMode,
+    },
+    BranchMapSelect {
+        project_id: u64,
+        project_name: String,
+    },
+    MrResult {
+        lines: Vec<(bool, String)>,
+    },
 }
 
 #[derive(Clone)]
@@ -43,6 +64,18 @@ enum MrMode {
     Single,
     Batch,
     FixedThree,
+}
+
+#[derive(Clone)]
+enum ExecutionPlan {
+    Sync {
+        project_idx: usize,
+    },
+    Merge {
+        project_idx: usize,
+        source_branch: String,
+        targets: Vec<String>,
+    },
 }
 
 impl App {
@@ -114,8 +147,9 @@ impl App {
                     match action {
                         Some(LocalOpAction::Select(op)) => match op {
                             LocalOp::Sync => {
-                                let results = self.execute_sync(pidx);
-                                page_stack.push(Page::ExecuteResult { lines: results });
+                                page_stack.push(Page::ExecutionPreview {
+                                    plan: ExecutionPlan::Sync { project_idx: pidx },
+                                });
                             }
                             _ => {
                                 page_stack.push(Page::SourceBranch {
@@ -139,14 +173,67 @@ impl App {
                     let op = operation.clone();
                     let action = self.show_source_branch(terminal, pidx)?;
                     match action {
-                        Some(BranchAction::Select(branch)) => {
-                            let results = self.execute_merge(pidx, &branch, &op);
-                            page_stack.push(Page::ExecuteResult { lines: results });
-                        }
+                        Some(BranchAction::Select(branch)) => match op {
+                            LocalOp::MergeSingle => {
+                                page_stack.push(Page::TargetBranch {
+                                    project_idx: pidx,
+                                    source_branch: branch,
+                                });
+                            }
+                            _ => {
+                                let targets = self.targets_for_operation(pidx, &op);
+                                page_stack.push(Page::ExecutionPreview {
+                                    plan: ExecutionPlan::Merge {
+                                        project_idx: pidx,
+                                        source_branch: branch,
+                                        targets,
+                                    },
+                                });
+                            }
+                        },
                         Some(BranchAction::Back) => {
                             page_stack.pop();
                         }
                         Some(BranchAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::TargetBranch {
+                    project_idx,
+                    source_branch,
+                } => {
+                    let pidx = *project_idx;
+                    let source = source_branch.clone();
+                    let action = self.show_target_branch(terminal, pidx)?;
+                    match action {
+                        Some(TargetBranchAction::Select(target)) => {
+                            page_stack.push(Page::ExecutionPreview {
+                                plan: ExecutionPlan::Merge {
+                                    project_idx: pidx,
+                                    source_branch: source,
+                                    targets: vec![target],
+                                },
+                            });
+                        }
+                        Some(TargetBranchAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(TargetBranchAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ExecutionPreview { plan } => {
+                    let current_plan = plan.clone();
+                    let action = self.show_execution_preview(terminal, &current_plan)?;
+                    match action {
+                        Some(PreviewAction::Confirm) => {
+                            let results = self.execute_plan(&current_plan);
+                            page_stack.push(Page::ExecuteResult { lines: results });
+                        }
+                        Some(PreviewAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(PreviewAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -164,7 +251,9 @@ impl App {
                             // Also pop the operation page to go back to project select
                             while matches!(
                                 page_stack.last(),
-                                Some(Page::SourceBranch { .. })
+                                Some(Page::ExecutionPreview { .. })
+                                    | Some(Page::TargetBranch { .. })
+                                    | Some(Page::SourceBranch { .. })
                                     | Some(Page::LocalOperation { .. })
                                     | Some(Page::BranchMapSelect { .. })
                                     | Some(Page::GitLabProjectSelect { .. })
@@ -346,9 +435,8 @@ impl App {
             vec!["先选择源分支，再选择一个目标合并分支进行 merge + push。".to_string()],
         ];
 
-        let mut menu =
-            MenuState::new("gmux / 本地操作", "上下选择操作类型，Enter 确认", items)
-                .with_details(details);
+        let mut menu = MenuState::new("gmux / 本地操作", "上下选择操作类型，Enter 确认", items)
+            .with_details(details);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -460,6 +548,132 @@ impl App {
         }
     }
 
+    fn show_target_branch(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_idx: usize,
+    ) -> Result<Option<TargetBranchAction>> {
+        let project = &self.projects[project_idx];
+        let targets = project::get_target_merge_branches(&self.config, &project.name);
+        let items: Vec<String> = targets.iter().map(|(_, target)| target.clone()).collect();
+        let details: Vec<Vec<String>> = targets
+            .iter()
+            .map(|(env, target)| {
+                vec![
+                    format!("环境分支: {env}"),
+                    format!("目标合并分支: {target}"),
+                ]
+            })
+            .collect();
+
+        let mut menu = MenuState::new("gmux / 目标分支", "选择一个目标合并分支", items.clone())
+            .with_details(details);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(i) => Some(TargetBranchAction::Select(items[i].clone())),
+                    MenuAction::Back => Some(TargetBranchAction::Back),
+                    MenuAction::Quit => Some(TargetBranchAction::Quit),
+                });
+            }
+        }
+    }
+
+    fn show_execution_preview(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        plan: &ExecutionPlan,
+    ) -> Result<Option<PreviewAction>> {
+        use ratatui::{
+            layout::{Constraint, Direction, Layout},
+            style::{Color, Modifier, Style},
+            text::{Line, Span},
+            widgets::{Block, Borders, Paragraph, Wrap},
+        };
+
+        let (title, subtitle, lines) = self.build_execution_preview(plan);
+
+        loop {
+            terminal.draw(|f| {
+                let area = f.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(8),
+                        Constraint::Length(2),
+                    ])
+                    .split(area);
+
+                let header = Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!("  {title}"),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        format!("  {subtitle}"),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(Color::Rgb(81, 81, 81))),
+                );
+
+                let body_lines: Vec<Line> = lines
+                    .iter()
+                    .map(|line| {
+                        Line::from(Span::styled(
+                            format!("  {line}"),
+                            Style::default().fg(Color::Rgb(220, 220, 220)),
+                        ))
+                    })
+                    .collect();
+
+                let body = Paragraph::new(body_lines)
+                    .block(
+                        Block::default()
+                            .title("  Dry Run / 执行预览  ")
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Rgb(81, 81, 81))),
+                    )
+                    .wrap(Wrap { trim: false });
+
+                let footer = Paragraph::new(Line::from(vec![
+                    Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" 执行  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("b", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("q", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" 退出", Style::default().fg(Color::DarkGray)),
+                ]));
+
+                f.render_widget(header, chunks[0]);
+                f.render_widget(body, chunks[1]);
+                f.render_widget(footer, chunks[2]);
+            })?;
+
+            if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                if key.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
+                return Ok(match key.code {
+                    crossterm::event::KeyCode::Enter => Some(PreviewAction::Confirm),
+                    crossterm::event::KeyCode::Char('b') | crossterm::event::KeyCode::Esc => {
+                        Some(PreviewAction::Back)
+                    }
+                    crossterm::event::KeyCode::Char('q') => Some(PreviewAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
     fn show_mr_menu(
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -468,10 +682,7 @@ impl App {
         let items = vec![
             "单个创建".to_string(),
             "批量创建（排除最后一组映射）".to_string(),
-            format!(
-                "批量创建（前 {} 组映射）",
-                env_count.saturating_sub(1)
-            ),
+            format!("批量创建（前 {} 组映射）", env_count.saturating_sub(1)),
             "返回主菜单".to_string(),
         ];
         let details = vec![
@@ -484,8 +695,8 @@ impl App {
             vec!["不执行 MR 操作。".to_string()],
         ];
 
-        let mut menu = MenuState::new("gmux / MR 模式", "选择 MR 处理方式", items)
-            .with_details(details);
+        let mut menu =
+            MenuState::new("gmux / MR 模式", "选择 MR 处理方式", items).with_details(details);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -526,12 +737,7 @@ impl App {
             .collect();
         let details: Vec<Vec<String>> = gl_projects
             .iter()
-            .map(|p| {
-                vec![
-                    format!("名称: {}", p.name),
-                    format!("ID: {}", p.id),
-                ]
-            })
+            .map(|p| vec![format!("名称: {}", p.name), format!("ID: {}", p.id)])
             .collect();
 
         let mut menu = MenuState::new(
@@ -577,12 +783,8 @@ impl App {
             })
             .collect();
 
-        let mut menu = MenuState::new(
-            "gmux / 分支映射",
-            "选择源分支与目标分支的映射关系",
-            items,
-        )
-        .with_details(details);
+        let mut menu = MenuState::new("gmux / 分支映射", "选择源分支与目标分支的映射关系", items)
+            .with_details(details);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -612,46 +814,119 @@ impl App {
         let results = project::sync_and_push(project, &self.config);
         results
             .into_iter()
-            .map(|r| (r.success, format!("{} -> {}: {}", r.branch, r.target, r.message)))
+            .map(|r| {
+                (
+                    r.success,
+                    format!("{} -> {}: {}", r.branch, r.target, r.message),
+                )
+            })
             .collect()
+    }
+
+    fn targets_for_operation(&self, project_idx: usize, operation: &LocalOp) -> Vec<String> {
+        let project = &self.projects[project_idx];
+        match operation {
+            LocalOp::MergeAll => project::get_target_merge_branches(&self.config, &project.name)
+                .into_iter()
+                .map(|(_, branch)| branch)
+                .collect(),
+            LocalOp::MergeFixed => {
+                project::get_fixed_target_merge_branches(&self.config, &project.name)
+                    .into_iter()
+                    .map(|(_, branch)| branch)
+                    .collect()
+            }
+            LocalOp::MergeSingle | LocalOp::Sync => Vec::new(),
+        }
     }
 
     fn execute_merge(
         &self,
         project_idx: usize,
         source_branch: &str,
-        operation: &LocalOp,
+        targets: &[String],
     ) -> Vec<(bool, String)> {
-        let project = &self.projects[project_idx];
-        let targets: Vec<String> = match operation {
-            LocalOp::MergeAll => project::get_target_merge_branches(&self.config, &project.name)
-                .into_iter()
-                .map(|(_, b)| b)
-                .collect(),
-            LocalOp::MergeFixed => {
-                project::get_fixed_target_merge_branches(&self.config, &project.name)
-                    .into_iter()
-                    .map(|(_, b)| b)
-                    .collect()
-            }
-            LocalOp::MergeSingle => {
-                // For single, we'd need another menu selection.
-                // For now use all targets - the caller should handle this differently.
-                // This is handled in the page flow.
-                Vec::new()
-            }
-            _ => Vec::new(),
-        };
-
         if targets.is_empty() {
             return vec![(false, "未选择目标分支".to_string())];
         }
 
+        let project = &self.projects[project_idx];
         let results = project::merge_to_targets(project, source_branch, &targets);
         results
             .into_iter()
-            .map(|r| (r.success, format!("{} -> {}: {}", r.branch, r.target, r.message)))
+            .map(|r| {
+                (
+                    r.success,
+                    format!("{} -> {}: {}", r.branch, r.target, r.message),
+                )
+            })
             .collect()
+    }
+
+    fn build_execution_preview(&self, plan: &ExecutionPlan) -> (String, String, Vec<String>) {
+        match plan {
+            ExecutionPlan::Sync { project_idx } => {
+                let project = &self.projects[*project_idx];
+                let mut lines = vec![
+                    format!("项目: {}", project.name),
+                    format!("仓库路径: {}", project.path.display()),
+                    String::new(),
+                    "即将执行以下步骤:".to_string(),
+                ];
+                for (env, merge) in project::get_target_merge_branches(&self.config, &project.name)
+                {
+                    lines.push(format!("- 更新环境分支 `{env}` 并 pull 最新代码"));
+                    lines.push(format!("- 同步到合并分支 `{merge}` 并 push"));
+                }
+                lines.push(String::new());
+                lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
+
+                (
+                    "gmux / 执行预览".to_string(),
+                    "确认本地同步操作影响范围".to_string(),
+                    lines,
+                )
+            }
+            ExecutionPlan::Merge {
+                project_idx,
+                source_branch,
+                targets,
+            } => {
+                let project = &self.projects[*project_idx];
+                let mut lines = vec![
+                    format!("项目: {}", project.name),
+                    format!("仓库路径: {}", project.path.display()),
+                    format!("源分支: {source_branch}"),
+                    format!("目标分支数量: {}", targets.len()),
+                    String::new(),
+                    "即将执行以下步骤:".to_string(),
+                ];
+                for target in targets {
+                    lines.push(format!("- checkout `{target}`"));
+                    lines.push(format!("- merge `{source_branch}` 到 `{target}`"));
+                    lines.push(format!("- push `{target}`"));
+                }
+                lines.push(String::new());
+                lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
+
+                (
+                    "gmux / 执行预览".to_string(),
+                    "确认本地合并操作影响范围".to_string(),
+                    lines,
+                )
+            }
+        }
+    }
+
+    fn execute_plan(&self, plan: &ExecutionPlan) -> Vec<(bool, String)> {
+        match plan {
+            ExecutionPlan::Sync { project_idx } => self.execute_sync(*project_idx),
+            ExecutionPlan::Merge {
+                project_idx,
+                source_branch,
+                targets,
+            } => self.execute_merge(*project_idx, source_branch, targets),
+        }
     }
 
     fn execute_mr_single(
@@ -665,7 +940,10 @@ impl App {
 
         match self.gitlab.create_mr(project_id, project_name, src, tgt) {
             Ok(mr) => {
-                results.push((true, format!("MR 创建成功: {} (IID: {})", mr.web_url, mr.iid)));
+                results.push((
+                    true,
+                    format!("MR 创建成功: {} (IID: {})", mr.web_url, mr.iid),
+                ));
                 // Try approve and merge
                 match self.gitlab.approve_and_merge(project_id, mr.iid) {
                     Ok(()) => results.push((true, "MR 已审批并合并".to_string())),
@@ -711,11 +989,7 @@ impl App {
         results
     }
 
-    fn execute_mr_fixed_three(
-        &self,
-        project_id: u64,
-        project_name: &str,
-    ) -> Vec<(bool, String)> {
+    fn execute_mr_fixed_three(&self, project_id: u64, project_name: &str) -> Vec<(bool, String)> {
         let mut results = Vec::new();
         let env_branches = &self.config.project.env_branches;
         let middle = &self.config.project.merge_branch_middle;
@@ -773,6 +1047,18 @@ enum LocalOpAction {
 
 enum BranchAction {
     Select(String),
+    Back,
+    Quit,
+}
+
+enum TargetBranchAction {
+    Select(String),
+    Back,
+    Quit,
+}
+
+enum PreviewAction {
+    Confirm,
     Back,
     Quit,
 }
