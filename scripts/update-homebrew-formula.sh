@@ -3,17 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-FORMULA_PATH="$REPO_ROOT/packaging/homebrew-tap/Formula/gmux.rb"
-TMP_FORMULA_PATH="$(mktemp "$REPO_ROOT/packaging/homebrew-tap/Formula/gmux.rb.XXXXXX")"
-
-cleanup() {
-  rm -f "$TMP_FORMULA_PATH"
-}
-trap cleanup EXIT
+DEFAULT_FORMULA_PATH="$REPO_ROOT/packaging/homebrew-tap/Formula/gmux.rb"
 
 OWNER="${OWNER:-life2you}"
 REPO="${REPO:-gmux}"
-VERSION="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" | head -n1)}"
+VERSION=""
+FORMULA_PATH="$DEFAULT_FORMULA_PATH"
+DRY_RUN=0
+TMP_FORMULA_PATH=""
 
 require_command() {
   local cmd="$1"
@@ -26,6 +23,74 @@ require_command() {
 require_command git
 require_command curl
 require_command shasum
+
+show_help() {
+  cat <<EOF
+Usage: ./scripts/update-homebrew-formula.sh [options] [version]
+
+Options:
+  --output PATH   Write the generated formula to PATH.
+  --dry-run       Print the generated formula to stdout instead of writing it.
+  --help          Show this help message.
+
+Defaults:
+  output path: $DEFAULT_FORMULA_PATH
+  version:     inferred from Cargo.toml when omitted
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --output" >&2
+        exit 1
+      fi
+      FORMULA_PATH="$2"
+      shift 2
+      ;;
+    --output=*)
+      FORMULA_PATH="${1#*=}"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --help)
+      show_help
+      exit 0
+      ;;
+    --)
+      shift
+      if [[ $# -gt 0 ]]; then
+        VERSION="$1"
+        shift
+      fi
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      echo "Use --help to see supported options." >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$VERSION" ]]; then
+        echo "Unexpected extra argument: $1" >&2
+        exit 1
+      fi
+      VERSION="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ $# -gt 0 ]]; then
+  echo "Unexpected extra arguments: $*" >&2
+  exit 1
+fi
+
+VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO_ROOT/Cargo.toml" | head -n1)}"
 
 if [[ -z "$VERSION" ]]; then
   echo "Failed to detect version from Cargo.toml" >&2
@@ -75,7 +140,7 @@ SHA256="$(
     awk '{print $1}'
 )"
 
-cat > "$TMP_FORMULA_PATH" <<EOF
+FORMULA_CONTENT="$(cat <<EOF
 class Gmux < Formula
   desc "Terminal Git workflow tool for multi-env branch sync and GitLab MR automation"
   homepage "https://github.com/$OWNER/$REPO"
@@ -94,7 +159,28 @@ class Gmux < Formula
   end
 end
 EOF
+)"
 
+if [[ "$DRY_RUN" == "1" ]]; then
+  printf '%s\n' "$FORMULA_CONTENT"
+  {
+    echo "Dry run only."
+    echo "Version: $VERSION"
+    echo "SHA256:  $SHA256"
+    echo "Output:  $FORMULA_PATH"
+  } >&2
+  exit 0
+fi
+
+mkdir -p "$(dirname "$FORMULA_PATH")"
+TMP_FORMULA_PATH="$(mktemp "$(dirname "$FORMULA_PATH")/$(basename "$FORMULA_PATH").XXXXXX")"
+
+cleanup() {
+  rm -f "$TMP_FORMULA_PATH"
+}
+trap cleanup EXIT
+
+printf '%s\n' "$FORMULA_CONTENT" > "$TMP_FORMULA_PATH"
 mv "$TMP_FORMULA_PATH" "$FORMULA_PATH"
 
 echo "Updated $FORMULA_PATH"
