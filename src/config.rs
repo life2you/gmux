@@ -60,30 +60,10 @@ impl Config {
     }
 
     fn find_config_file() -> Option<PathBuf> {
-        // 1. $GMUX_CONFIG
-        if let Ok(env_path) = std::env::var("GMUX_CONFIG") {
-            let p = PathBuf::from(&env_path);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-
-        // 2. ./gmux.toml
-        let local = PathBuf::from("./gmux.toml");
-        if local.is_file() {
-            return Some(local);
-        }
-
-        // 3. ~/.config/gmux/gmux.toml
+        // Only ~/.config/gmux/gmux.toml
         let xdg = Self::xdg_config_path();
         if xdg.is_file() {
             return Some(xdg);
-        }
-
-        // 4. Legacy macOS path: ~/Library/Application Support/gmux/gmux.toml
-        let legacy = Self::legacy_global_config_path();
-        if legacy.is_file() {
-            return Some(legacy);
         }
 
         None
@@ -101,13 +81,6 @@ impl Config {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".config")
-            .join("gmux")
-            .join("gmux.toml")
-    }
-
-    fn legacy_global_config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
             .join("gmux")
             .join("gmux.toml")
     }
@@ -218,21 +191,7 @@ impl Config {
             println!("    {src} -> {tgt}");
         }
 
-        println!("\n\x1b[0;36m配置文件保存位置：\x1b[0m");
-        println!("  1. ./gmux.toml（当前目录）");
-        println!("  2. ~/.config/gmux/gmux.toml");
-        print!("请选择 [1/2]（默认 2）: ");
-        io::stdout().flush()?;
-
-        let mut choice = String::new();
-        io::stdin().read_line(&mut choice)?;
-        let choice = choice.trim();
-
-        let save_path = if choice == "1" {
-            PathBuf::from("./gmux.toml")
-        } else {
-            Self::default_global_config_path()
-        };
+        let save_path = Self::default_global_config_path();
 
         config.save(&save_path)?;
         println!(

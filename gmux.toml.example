@@ -2,12 +2,9 @@
 # 复制此文件为 gmux.toml 并填入实际值
 # 也可以运行 `gmux init` 进入交互式初始化向导
 #
-# 配置文件查找顺序：
-#   1. $GMUX_CONFIG 环境变量指定的路径
-#   2. ./gmux.toml（当前目录）
-#   3. ~/.config/gmux/gmux.toml
-#   4. ~/Library/Application Support/gmux/gmux.toml（兼容旧 macOS 路径）
-# 初始化向导默认会保存到 ~/.config/gmux/gmux.toml
+# 配置文件固定位置：
+#   ~/.config/gmux/gmux.toml
+# 初始化向导会保存到这个位置
 
 [gitlab]
 # GitLab 服务器地址（必填）
