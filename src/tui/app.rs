@@ -198,27 +198,16 @@ impl App {
                             page_stack.push(Page::ConfigBranchMapMenu);
                         }
                         Some(ConfigMenuAction::ResetBranchMap) => {
-                            self.config.regenerate_branch_map();
-                            page_stack.push(Page::ExecuteResult {
-                                lines: vec![
-                                    (true, "已根据当前 env_branches 和 merge_branch_middle 重建 branch_map".to_string()),
-                                    (true, "这一步只更新内存中的配置，记得再执行一次“保存配置”".to_string()),
-                                ],
-                            });
-                        }
-                        Some(ConfigMenuAction::Save) => {
-                            match self.save_current_config() {
-                                Ok(path) => {
-                                    page_stack.push(Page::ExecuteResult {
-                                    lines: vec![
-                                        (true, format!("配置已保存到 {}", path.display())),
-                                        (true, "后续本地同步、合并和 GitLab MR 都会按这份新配置运行".to_string()),
-                                    ],
-                                });
-                                }
+                            match self.persist_config_change(|config| {
+                                config.regenerate_branch_map();
+                            }) {
+                                Ok(()) => {}
                                 Err(err) => {
                                     page_stack.push(Page::ExecuteResult {
-                                        lines: vec![(false, format!("保存配置失败: {err:#}"))],
+                                        lines: vec![(
+                                            false,
+                                            format!("重建默认 branch_map 失败: {err:#}"),
+                                        )],
                                     });
                                 }
                             }
@@ -238,8 +227,17 @@ impl App {
                             if value.is_empty() {
                                 state.error = Some("输入不能为空".to_string());
                             } else {
-                                self.config.project.merge_branch_middle = value.to_string();
-                                page_stack.pop();
+                                let new_value = value.to_string();
+                                match self.persist_config_change(|config| {
+                                    config.project.merge_branch_middle = new_value;
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
+                                    }
+                                }
                             }
                         }
                         Some(InputAction::Back) => {
@@ -284,33 +282,65 @@ impl App {
                                     lines: vec![(false, "至少需要保留一个环境分支".to_string())],
                                 });
                             } else {
-                                let removed =
-                                    self.config.project.env_branches.remove(current_index);
-                                page_stack.pop();
-                                page_stack.push(Page::ExecuteResult {
-                                    lines: vec![
-                                        (true, format!("已删除环境分支: {removed}")),
-                                        (true, "如果 branch_map 还依赖这个分支，记得同步调整或重建默认映射".to_string()),
-                                    ],
-                                });
+                                match self.persist_config_change(|config| {
+                                    config.project.env_branches.remove(current_index);
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        page_stack.push(Page::ExecuteResult {
+                                            lines: vec![(
+                                                false,
+                                                format!("删除环境分支失败: {err:#}"),
+                                            )],
+                                        });
+                                    }
+                                }
                             }
                         }
                         Some(ConfigEnvBranchAction::MoveUp) => {
                             if current_index > 0 {
-                                self.config
-                                    .project
-                                    .env_branches
-                                    .swap(current_index, current_index - 1);
-                                *index -= 1;
+                                match self.persist_config_change(|config| {
+                                    config
+                                        .project
+                                        .env_branches
+                                        .swap(current_index, current_index - 1);
+                                }) {
+                                    Ok(()) => {
+                                        *index -= 1;
+                                    }
+                                    Err(err) => {
+                                        page_stack.push(Page::ExecuteResult {
+                                            lines: vec![(
+                                                false,
+                                                format!("调整环境分支顺序失败: {err:#}"),
+                                            )],
+                                        });
+                                    }
+                                }
                             }
                         }
                         Some(ConfigEnvBranchAction::MoveDown) => {
                             if current_index + 1 < self.config.project.env_branches.len() {
-                                self.config
-                                    .project
-                                    .env_branches
-                                    .swap(current_index, current_index + 1);
-                                *index += 1;
+                                match self.persist_config_change(|config| {
+                                    config
+                                        .project
+                                        .env_branches
+                                        .swap(current_index, current_index + 1);
+                                }) {
+                                    Ok(()) => {
+                                        *index += 1;
+                                    }
+                                    Err(err) => {
+                                        page_stack.push(Page::ExecuteResult {
+                                            lines: vec![(
+                                                false,
+                                                format!("调整环境分支顺序失败: {err:#}"),
+                                            )],
+                                        });
+                                    }
+                                }
                             }
                         }
                         Some(ConfigEnvBranchAction::Back) => {
@@ -328,16 +358,22 @@ impl App {
                             if branch.is_empty() {
                                 state.error = Some("环境分支不能为空".to_string());
                             } else {
-                                match index {
+                                let new_branch = branch.to_string();
+                                match self.persist_config_change(|config| match index {
                                     Some(edit_index) => {
-                                        self.config.project.env_branches[*edit_index] =
-                                            branch.to_string();
+                                        config.project.env_branches[*edit_index] = new_branch;
                                     }
                                     None => {
-                                        self.config.project.env_branches.push(branch.to_string());
+                                        config.project.env_branches.push(new_branch);
+                                    }
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
                                     }
                                 }
-                                page_stack.pop();
                             }
                         }
                         Some(InputAction::Back) => {
@@ -379,11 +415,18 @@ impl App {
                             });
                         }
                         Some(ConfigBranchMapAction::Delete) => {
-                            self.config.branch_map.remove(&selected_source);
-                            page_stack.pop();
-                            page_stack.push(Page::ExecuteResult {
-                                lines: vec![(true, format!("已删除分支映射: {selected_source}"))],
-                            });
+                            match self.persist_config_change(|config| {
+                                config.branch_map.remove(&selected_source);
+                            }) {
+                                Ok(()) => {
+                                    page_stack.pop();
+                                }
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(false, format!("删除分支映射失败: {err:#}"))],
+                                    });
+                                }
+                            }
                         }
                         Some(ConfigBranchMapAction::Back) => {
                             page_stack.pop();
@@ -431,14 +474,24 @@ impl App {
                             if target_branch.is_empty() {
                                 state.error = Some("目标分支不能为空".to_string());
                             } else {
-                                if let Some(original) = &draft.original_source {
-                                    self.config.branch_map.remove(original);
+                                let draft = draft.clone();
+                                let new_target = target_branch.to_string();
+                                match self.persist_config_change(|config| {
+                                    if let Some(original) = &draft.original_source {
+                                        config.branch_map.remove(original);
+                                    }
+                                    config
+                                        .branch_map
+                                        .insert(draft.source_branch.clone(), new_target);
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
+                                    }
                                 }
-                                self.config
-                                    .branch_map
-                                    .insert(draft.source_branch.clone(), target_branch.to_string());
-                                page_stack.pop();
-                                page_stack.pop();
                             }
                         }
                         Some(InputAction::Back) => {
@@ -779,7 +832,7 @@ impl App {
                 "本地分支同步 / 合并：用于本地仓库的环境分支同步、批量 merge 和 push。".to_string(),
                 "GitLab MR 创建：用于创建单个或批量 Merge Request，并在成功后自动尝试审批与合并。"
                     .to_string(),
-                "配置管理：可以直接在界面里调整 merge_branch_middle、env_branches 和 branch_map，并保存配置。".to_string(),
+                "配置管理：可以直接在界面里调整 merge_branch_middle、env_branches 和 branch_map，改动会自动保存。".to_string(),
                 "按 Enter 进入当前选中的功能，按 b 或 Esc 返回，按 q 退出程序。".to_string(),
             ]);
 
@@ -807,7 +860,6 @@ impl App {
             "修改环境分支列表".to_string(),
             "修改 branch_map".to_string(),
             "根据当前环境分支重建默认 branch_map".to_string(),
-            "保存配置".to_string(),
             "返回主菜单".to_string(),
         ];
         let branch_map_preview = self.branch_map_entries();
@@ -842,10 +894,9 @@ impl App {
                 "如果你有手工定制过 branch_map，这一步会覆盖掉它。".to_string(),
             ],
             vec![
-                format!("保存路径: {}", Config::config_path().display()),
-                "保存后新的配置会立刻影响后续操作。".to_string(),
+                format!("配置路径: {}", Config::config_path().display()),
+                "这里的改动会立即自动保存并立刻影响后续操作。".to_string(),
             ],
-            vec!["不保存并返回主菜单。".to_string()],
         ];
 
         let mut menu = MenuState::new(
@@ -858,7 +909,7 @@ impl App {
             "这里可以直接修改分支相关配置，不需要退出 gmux 手工改 TOML。".to_string(),
             "环境分支列表决定本地同步和本地合并的目标分支集合。".to_string(),
             "branch_map 决定 GitLab MR 的源/目标映射关系。".to_string(),
-            "修改后只有在执行“保存配置”后才会写回 ~/.config/gmux/gmux.toml。".to_string(),
+            "这里的修改会自动写回 ~/.config/gmux/gmux.toml，不需要额外手动保存。".to_string(),
         ]);
 
         loop {
@@ -869,8 +920,7 @@ impl App {
                     MenuAction::Select(1) => Some(ConfigMenuAction::EditEnvBranches),
                     MenuAction::Select(2) => Some(ConfigMenuAction::EditBranchMap),
                     MenuAction::Select(3) => Some(ConfigMenuAction::ResetBranchMap),
-                    MenuAction::Select(4) => Some(ConfigMenuAction::Save),
-                    MenuAction::Select(5) => Some(ConfigMenuAction::Back),
+                    MenuAction::Select(4) => Some(ConfigMenuAction::Back),
                     MenuAction::Back => Some(ConfigMenuAction::Back),
                     MenuAction::Quit => Some(ConfigMenuAction::Quit),
                     _ => None,
@@ -2097,6 +2147,19 @@ impl App {
         Ok(path)
     }
 
+    fn persist_config_change<F>(&mut self, mutate: F) -> Result<()>
+    where
+        F: FnOnce(&mut Config),
+    {
+        let previous = self.config.clone();
+        mutate(&mut self.config);
+        if let Err(err) = self.save_current_config() {
+            self.config = previous;
+            return Err(err);
+        }
+        Ok(())
+    }
+
     fn execute_plan(&self, plan: &ExecutionPlan) -> Vec<(bool, String)> {
         match plan {
             ExecutionPlan::Sync { project_idx } => self.execute_sync(*project_idx),
@@ -2226,7 +2289,6 @@ enum ConfigMenuAction {
     EditEnvBranches,
     EditBranchMap,
     ResetBranchMap,
-    Save,
     Back,
     Quit,
 }
