@@ -444,7 +444,14 @@ impl App {
             vec!["结束 gmux。".to_string()],
         ];
 
-        let mut menu = MenuState::new("gmux", "终端 Git 工作流工具", items).with_details(details);
+        let mut menu = MenuState::new("gmux", "终端 Git 工作流工具", items)
+            .with_details(details)
+            .with_help(vec![
+                "本地分支同步 / 合并：用于本地仓库的环境分支同步、批量 merge 和 push。".to_string(),
+                "GitLab MR 创建：用于创建单个或批量 Merge Request，并在成功后自动尝试审批与合并。"
+                    .to_string(),
+                "按 Enter 进入当前选中的功能，按 b 或 Esc 返回，按 q 退出程序。".to_string(),
+            ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -487,7 +494,12 @@ impl App {
             items,
         )
         .with_details(details)
-        .with_search("输入项目名或路径关键词");
+        .with_search("输入项目名或路径关键词")
+        .with_help(vec![
+            "这里显示项目根目录下扫描到的本地 Git 仓库。".to_string(),
+            "按 / 搜索项目名或路径关键词，便于仓库较多时快速定位。".to_string(),
+            "进入项目后可以继续做本地同步、批量 merge 或单目标 merge。".to_string(),
+        ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -525,7 +537,12 @@ impl App {
         ];
 
         let mut menu = MenuState::new("gmux / 本地操作", "上下选择操作类型，Enter 确认", items)
-            .with_details(details);
+            .with_details(details)
+            .with_help(vec![
+                "同步：更新各环境分支，再同步到对应合并分支并 push。".to_string(),
+                "批量合并：选择一个源分支后，将其 merge 到多个目标合并分支。".to_string(),
+                "自定义多选：适合灰度、局部回合并或临时只处理部分环境。".to_string(),
+            ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -580,7 +597,12 @@ impl App {
                 "空格勾选多个目标分支，Enter 进入执行预览",
                 targets,
             )
-            .with_details(details),
+            .with_details(details)
+            .with_help(vec![
+                "用空格勾选一个或多个目标分支。".to_string(),
+                "至少需要选择一个目标分支，Enter 后会先进入执行预览，不会立刻执行。".to_string(),
+                "适合只对部分环境分支做 merge 的场景。".to_string(),
+            ]),
         })
     }
 
@@ -610,7 +632,12 @@ impl App {
             branches.clone(),
         )
         .with_details(details)
-        .with_search("输入分支关键词");
+        .with_search("输入分支关键词")
+        .with_help(vec![
+            "源分支是这次 merge 或同步的输入分支。".to_string(),
+            "列表来自当前本地仓库的本地分支；可按 / 搜索。".to_string(),
+            "进入下一步后，gmux 会先展示执行前检查和完整预览。".to_string(),
+        ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -649,11 +676,17 @@ impl App {
                 ])
             })
             .collect();
+        let help_lines = vec![
+            "这里显示本次执行的最终结果，包括成功项和失败项。".to_string(),
+            "失败信息会尽量保留原始错误，便于判断是 Git、网络还是 GitLab API 问题。".to_string(),
+            "按任意键返回上一层；按 ? 可再次查看这页说明。".to_string(),
+        ];
+        let mut help_visible = false;
 
         let mut footer_lines = text_lines.clone();
         footer_lines.push(Line::raw(""));
         footer_lines.push(Line::from(Span::styled(
-            "按任意键返回",
+            "按任意键返回，按 ? 查看说明",
             Style::default().fg(Color::DarkGray),
         )));
 
@@ -669,10 +702,28 @@ impl App {
                     )
                     .wrap(Wrap { trim: false });
                 f.render_widget(p, area);
+                if help_visible {
+                    self.render_help_overlay(f, "结果说明", &help_lines);
+                }
             })?;
 
             if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
                 if key.kind == crossterm::event::KeyEventKind::Press {
+                    if help_visible {
+                        match key.code {
+                            crossterm::event::KeyCode::Char('?')
+                            | crossterm::event::KeyCode::Char('b')
+                            | crossterm::event::KeyCode::Esc => {
+                                help_visible = false;
+                                continue;
+                            }
+                            _ => continue,
+                        }
+                    }
+                    if key.code == crossterm::event::KeyCode::Char('?') {
+                        help_visible = true;
+                        continue;
+                    }
                     return Ok(Some(ResultAction::Back));
                 }
             }
@@ -699,7 +750,12 @@ impl App {
 
         let mut menu = MenuState::new("gmux / 目标分支", "选择一个目标合并分支", items.clone())
             .with_details(details)
-            .with_search("输入环境名或目标分支关键词");
+            .with_search("输入环境名或目标分支关键词")
+            .with_help(vec![
+                "这里选择一个目标合并分支，用于单目标 merge。".to_string(),
+                "环境分支和目标合并分支的对应关系由配置文件决定。".to_string(),
+                "确认后仍会先进入执行预览，再决定是否真正执行。".to_string(),
+            ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -726,6 +782,8 @@ impl App {
         };
 
         let (title, subtitle, lines) = self.build_execution_preview(plan);
+        let help_lines = self.build_execution_help(plan);
+        let mut help_visible = false;
 
         loop {
             terminal.draw(|f| {
@@ -779,6 +837,8 @@ impl App {
                 let footer = Paragraph::new(Line::from(vec![
                     Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
                     Span::styled(" 执行  ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("?", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" 说明  ", Style::default().fg(Color::DarkGray)),
                     Span::styled("b", Style::default().fg(Color::DarkGray)),
                     Span::styled(" 返回  ", Style::default().fg(Color::DarkGray)),
                     Span::styled("q", Style::default().fg(Color::DarkGray)),
@@ -788,10 +848,31 @@ impl App {
                 f.render_widget(header, chunks[0]);
                 f.render_widget(body, chunks[1]);
                 f.render_widget(footer, chunks[2]);
+                if help_visible {
+                    self.render_help_overlay(f, "执行说明", &help_lines);
+                }
             })?;
 
             if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
                 if key.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
+                if help_visible {
+                    match key.code {
+                        crossterm::event::KeyCode::Char('?')
+                        | crossterm::event::KeyCode::Char('b')
+                        | crossterm::event::KeyCode::Esc => {
+                            help_visible = false;
+                            continue;
+                        }
+                        crossterm::event::KeyCode::Char('q') => {
+                            return Ok(Some(PreviewAction::Quit));
+                        }
+                        _ => continue,
+                    }
+                }
+                if key.code == crossterm::event::KeyCode::Char('?') {
+                    help_visible = true;
                     continue;
                 }
                 return Ok(match key.code {
@@ -827,8 +908,13 @@ impl App {
             vec!["不执行 MR 操作。".to_string()],
         ];
 
-        let mut menu =
-            MenuState::new("gmux / MR 模式", "选择 MR 处理方式", items).with_details(details);
+        let mut menu = MenuState::new("gmux / MR 模式", "选择 MR 处理方式", items)
+            .with_details(details)
+            .with_help(vec![
+                "单个创建：手动选一组源/目标分支映射创建 MR。".to_string(),
+                "批量创建：按分支映射批量创建 MR，并对成功的 MR 自动尝试审批与合并。".to_string(),
+                "固定映射：只处理前 N 组固定环境映射，适合标准发布链路。".to_string(),
+            ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -878,7 +964,12 @@ impl App {
             items,
         )
         .with_details(details)
-        .with_search("输入项目名或 ID 关键词");
+        .with_search("输入项目名或 ID 关键词")
+        .with_help(vec![
+            "这里列出当前 token 可访问的 GitLab 项目。".to_string(),
+            "按 / 可以按项目名或项目 ID 搜索。".to_string(),
+            "如果加载失败，gmux 会留在 TUI 内显示错误，而不会直接退出程序。".to_string(),
+        ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -918,7 +1009,12 @@ impl App {
 
         let mut menu = MenuState::new("gmux / 分支映射", "选择源分支与目标分支的映射关系", items)
             .with_details(details)
-            .with_search("输入源分支或目标分支关键词");
+            .with_search("输入源分支或目标分支关键词")
+            .with_help(vec![
+                "这里使用配置文件中的 branch_map 定义源分支和目标分支关系。".to_string(),
+                "选择后会先进入 GitLab MR 执行预览，再决定是否真正创建。".to_string(),
+                "按 / 可以搜索源分支名或目标分支名。".to_string(),
+            ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -1239,6 +1335,87 @@ impl App {
         }
     }
 
+    fn build_execution_help(&self, plan: &ExecutionPlan) -> Vec<String> {
+        match plan {
+            ExecutionPlan::Sync { .. } => vec![
+                "同步操作会依次更新环境分支，再同步到对应合并分支并 push。".to_string(),
+                "预览中的执行前检查会告诉你工作区是否干净、相关分支是否存在。".to_string(),
+                "按 Enter 才会真正开始执行；按 b 返回上一层。".to_string(),
+            ],
+            ExecutionPlan::Merge { .. } => vec![
+                "合并操作会把选定源分支 merge 到一个或多个目标合并分支，并逐个 push。".to_string(),
+                "如果目标分支不存在，执行阶段会按当前逻辑自动创建。".to_string(),
+                "预览页中的 ahead/behind 信息可以帮助你先判断远端分支状态。".to_string(),
+            ],
+            ExecutionPlan::MrSingle { .. } => vec![
+                "单个 MR 会先创建 Merge Request，再自动尝试审批与合并。".to_string(),
+                "这里只有预览，按 Enter 才会真正请求 GitLab API。".to_string(),
+                "如果自动审批或自动合并失败，结果页会单独显示失败阶段。".to_string(),
+            ],
+            ExecutionPlan::MrBatch { .. } => vec![
+                "批量 MR 会依次创建多组 MR，再对创建成功的 MR 自动尝试审批与合并。".to_string(),
+                "如果其中某组失败，不会阻止其它组继续执行。".to_string(),
+                "预览页会先列出这次计划处理的全部映射关系。".to_string(),
+            ],
+            ExecutionPlan::MrFixedThree { .. } => vec![
+                "固定映射 MR 只会处理前 N 组标准环境映射。".to_string(),
+                "执行顺序与批量 MR 相同：先创建，再对成功的 MR 自动尝试审批与合并。".to_string(),
+                "如果你只想处理部分环境，建议使用单个 MR 或后续扩展的自定义能力。".to_string(),
+            ],
+        }
+    }
+
+    fn render_help_overlay(
+        &self,
+        frame: &mut ratatui::Frame,
+        title: &str,
+        lines: &[String],
+    ) {
+        use ratatui::{
+            style::{Color, Modifier, Style},
+            text::{Line, Span},
+            widgets::{Block, Borders, Clear, Paragraph, Wrap},
+        };
+
+        let area = centered_rect(80, 70, frame.area());
+        let mut body = vec![
+            Line::from(Span::styled(
+                "帮助说明",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+        ];
+
+        if lines.is_empty() {
+            body.push(Line::from(Span::raw("• 当前页暂无额外说明")));
+        } else {
+            for line in lines {
+                body.push(Line::from(Span::raw(format!("• {line}"))));
+            }
+        }
+
+        body.push(Line::raw(""));
+        body.push(Line::from(Span::styled(
+            "? / Esc / b 关闭说明",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(body)
+                .block(
+                    Block::default()
+                        .title(format!("  {title}  "))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow)),
+                )
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+
     fn branch_map_without_master(&self) -> Vec<(String, String)> {
         let mut mappings: Vec<(String, String)> = self
             .config
@@ -1382,6 +1559,28 @@ impl App {
 
         results
     }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    use ratatui::layout::{Constraint, Direction, Layout};
+
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 // ---- Action enums ----

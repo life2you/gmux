@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -15,6 +15,8 @@ pub struct ChecklistState {
     pub list_state: ListState,
     pub selected: Vec<bool>,
     pub error: Option<String>,
+    pub help_lines: Vec<String>,
+    pub help_visible: bool,
 }
 
 pub enum ChecklistAction {
@@ -39,11 +41,18 @@ impl ChecklistState {
             list_state,
             selected,
             error: None,
+            help_lines: Vec::new(),
+            help_visible: false,
         }
     }
 
     pub fn with_details(mut self, details: Vec<Vec<String>>) -> Self {
         self.details = details;
+        self
+    }
+
+    pub fn with_help(mut self, lines: Vec<String>) -> Self {
+        self.help_lines = lines;
         self
     }
 
@@ -86,10 +95,24 @@ impl ChecklistState {
                 return None;
             }
 
+            if self.help_visible {
+                match key.code {
+                    KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('b') => {
+                        self.help_visible = false;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Some(ChecklistAction::Quit);
+                    }
+                    _ => {}
+                }
+                return None;
+            }
+
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.move_up(),
                 KeyCode::Down | KeyCode::Char('j') => self.move_down(),
                 KeyCode::Char(' ') => self.toggle_selected(),
+                KeyCode::Char('?') => self.help_visible = true,
                 KeyCode::Enter => {
                     let indexes: Vec<usize> = self
                         .selected
@@ -133,6 +156,9 @@ impl ChecklistState {
         self.render_error(frame, chunks[2]);
         self.render_details(frame, chunks[3]);
         self.render_footer(frame, chunks[4]);
+        if self.help_visible {
+            self.render_help_overlay(frame);
+        }
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
@@ -239,6 +265,8 @@ impl ChecklistState {
             Span::styled(" 移动  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Space", Style::default().fg(Color::DarkGray)),
             Span::styled(" 勾选  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("?", Style::default().fg(Color::DarkGray)),
+            Span::styled(" 说明  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter", Style::default().fg(Color::DarkGray)),
             Span::styled(" 确认  ", Style::default().fg(Color::DarkGray)),
             Span::styled("b", Style::default().fg(Color::DarkGray)),
@@ -248,4 +276,64 @@ impl ChecklistState {
         ]));
         frame.render_widget(footer, area);
     }
+
+    fn render_help_overlay(&self, frame: &mut Frame) {
+        let area = centered_rect(80, 70, frame.area());
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "帮助说明",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+        ];
+
+        if self.help_lines.is_empty() {
+            lines.push(Line::from(Span::raw("• 当前页暂无额外说明")));
+        } else {
+            for line in &self.help_lines {
+                lines.push(Line::from(Span::raw(format!("• {line}"))));
+            }
+        }
+
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "? / Esc / b 关闭说明",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .title("  页面说明  ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow)),
+                )
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
