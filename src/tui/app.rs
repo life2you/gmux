@@ -11,7 +11,9 @@ use crate::git;
 use crate::gitlab::GitLabClient;
 use crate::project::{self, Project};
 use crate::tui::checklist::{ChecklistAction, ChecklistState};
+use crate::tui::input::{InputAction, InputState};
 use crate::tui::menu::{MenuAction, MenuState};
+use std::collections::HashMap;
 
 pub struct App {
     config: Config,
@@ -21,6 +23,16 @@ pub struct App {
 
 enum Page {
     MainMenu,
+    ConfigMenu,
+    ConfigMergeMiddleInput {
+        state: InputState,
+    },
+    ConfigEnvBranchesInput {
+        state: InputState,
+    },
+    ConfigBranchMapInput {
+        state: InputState,
+    },
     ProjectSelect,
     LocalOperation {
         project_idx: usize,
@@ -142,10 +154,123 @@ impl App {
                             self.scan_projects()?;
                             page_stack.push(Page::ProjectSelect);
                         }
+                        Some(MainMenuAction::ConfigManage) => {
+                            page_stack.push(Page::ConfigMenu);
+                        }
                         Some(MainMenuAction::GitLabMr) => {
                             page_stack.push(Page::MrMenu);
                         }
                         Some(MainMenuAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigMenu => {
+                    let action = self.show_config_menu(terminal)?;
+                    match action {
+                        Some(ConfigMenuAction::EditMergeMiddle) => {
+                            page_stack.push(Page::ConfigMergeMiddleInput {
+                                state: self.config_merge_middle_input(),
+                            });
+                        }
+                        Some(ConfigMenuAction::EditEnvBranches) => {
+                            page_stack.push(Page::ConfigEnvBranchesInput {
+                                state: self.config_env_branches_input(),
+                            });
+                        }
+                        Some(ConfigMenuAction::EditBranchMap) => {
+                            page_stack.push(Page::ConfigBranchMapInput {
+                                state: self.config_branch_map_input(),
+                            });
+                        }
+                        Some(ConfigMenuAction::ResetBranchMap) => {
+                            self.config.regenerate_branch_map();
+                            page_stack.push(Page::ExecuteResult {
+                                lines: vec![
+                                    (true, "已根据当前 env_branches 和 merge_branch_middle 重建 branch_map".to_string()),
+                                    (true, "这一步只更新内存中的配置，记得再执行一次“保存配置”".to_string()),
+                                ],
+                            });
+                        }
+                        Some(ConfigMenuAction::Save) => {
+                            match self.save_current_config() {
+                                Ok(path) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                    lines: vec![
+                                        (true, format!("配置已保存到 {}", path.display())),
+                                        (true, "后续本地同步、合并和 GitLab MR 都会按这份新配置运行".to_string()),
+                                    ],
+                                });
+                                }
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(false, format!("保存配置失败: {err:#}"))],
+                                    });
+                                }
+                            }
+                        }
+                        Some(ConfigMenuAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigMenuAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigMergeMiddleInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let value = value.trim();
+                            if value.is_empty() {
+                                state.error = Some("输入不能为空".to_string());
+                            } else {
+                                self.config.project.merge_branch_middle = value.to_string();
+                                page_stack.pop();
+                            }
+                        }
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigEnvBranchesInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            match Self::parse_env_branches(&value) {
+                                Ok(branches) => {
+                                    self.config.project.env_branches = branches;
+                                    page_stack.pop();
+                                }
+                                Err(err) => {
+                                    state.error = Some(err.to_string());
+                                }
+                            }
+                        }
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigBranchMapInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => match Self::parse_branch_map(&value) {
+                            Ok(branch_map) => {
+                                self.config.branch_map = branch_map;
+                                page_stack.pop();
+                            }
+                            Err(err) => {
+                                state.error = Some(err.to_string());
+                            }
+                        },
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -462,11 +587,13 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<MainMenuAction>> {
         let items = vec![
+            "配置管理".to_string(),
             "本地分支同步 / 合并（含推送）".to_string(),
             "GitLab MR 创建".to_string(),
             "退出程序".to_string(),
         ];
         let details = vec![
+            vec!["在 TUI 里直接修改分支相关配置，并保存到 ~/.config/gmux/gmux.toml。".to_string()],
             vec!["适合处理本地项目的环境分支同步、批量合并、单分支合并和推送。".to_string()],
             vec!["适合直接创建单个或批量 Merge Request，并支持后续审批合并。".to_string()],
             vec!["结束 gmux。".to_string()],
@@ -475,6 +602,7 @@ impl App {
         let mut menu = MenuState::new("gmux", "终端 Git 工作流工具", items)
             .with_details(details)
             .with_help(vec![
+                "配置管理：可以直接在界面里调整 merge_branch_middle、env_branches 和 branch_map，并保存配置。".to_string(),
                 "本地分支同步 / 合并：用于本地仓库的环境分支同步、批量 merge 和 push。".to_string(),
                 "GitLab MR 创建：用于创建单个或批量 Merge Request，并在成功后自动尝试审批与合并。"
                     .to_string(),
@@ -485,10 +613,92 @@ impl App {
             terminal.draw(|f| menu.render(f))?;
             if let Some(action) = menu.handle_key_event() {
                 return Ok(match action {
-                    MenuAction::Select(0) => Some(MainMenuAction::LocalOps),
-                    MenuAction::Select(1) => Some(MainMenuAction::GitLabMr),
-                    MenuAction::Select(2) | MenuAction::Back => Some(MainMenuAction::Quit),
+                    MenuAction::Select(0) => Some(MainMenuAction::ConfigManage),
+                    MenuAction::Select(1) => Some(MainMenuAction::LocalOps),
+                    MenuAction::Select(2) => Some(MainMenuAction::GitLabMr),
+                    MenuAction::Select(3) | MenuAction::Back => Some(MainMenuAction::Quit),
                     MenuAction::Quit => Some(MainMenuAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_menu(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<Option<ConfigMenuAction>> {
+        let items = vec![
+            "修改合并分支中间名".to_string(),
+            "修改环境分支列表".to_string(),
+            "修改 branch_map".to_string(),
+            "根据当前环境分支重建默认 branch_map".to_string(),
+            "保存配置".to_string(),
+            "返回主菜单".to_string(),
+        ];
+        let branch_map_preview = self.branch_map_entries();
+        let preview_lines = if branch_map_preview.is_empty() {
+            vec!["当前没有映射".to_string()]
+        } else {
+            branch_map_preview
+                .iter()
+                .take(4)
+                .map(|(src, tgt)| format!("{src} -> {tgt}"))
+                .collect()
+        };
+        let details = vec![
+            vec![
+                format!("当前值: {}", self.config.project.merge_branch_middle),
+                "会影响默认生成的 merge 分支名和默认 branch_map。".to_string(),
+            ],
+            vec![
+                format!(
+                    "当前共 {} 个环境分支",
+                    self.config.project.env_branches.len()
+                ),
+                format!("当前值: {}", self.config.project.env_branches.join(" ")),
+            ],
+            {
+                let mut lines = vec![format!("当前共 {} 组映射", branch_map_preview.len())];
+                lines.extend(preview_lines);
+                lines
+            },
+            vec![
+                "按当前 env_branches + merge_branch_middle 重建默认映射。".to_string(),
+                "如果你有手工定制过 branch_map，这一步会覆盖掉它。".to_string(),
+            ],
+            vec![
+                format!("保存路径: {}", Config::config_path().display()),
+                "保存后新的配置会立刻影响后续操作。".to_string(),
+            ],
+            vec!["不保存并返回主菜单。".to_string()],
+        ];
+
+        let mut menu = MenuState::new(
+            "gmux / 配置管理",
+            "动态修改分支相关配置，改完记得保存",
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "这里可以直接修改分支相关配置，不需要退出 gmux 手工改 TOML。".to_string(),
+            "环境分支列表决定本地同步和本地合并的目标分支集合。".to_string(),
+            "branch_map 决定 GitLab MR 的源/目标映射关系。".to_string(),
+            "修改后只有在执行“保存配置”后才会写回 ~/.config/gmux/gmux.toml。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ConfigMenuAction::EditMergeMiddle),
+                    MenuAction::Select(1) => Some(ConfigMenuAction::EditEnvBranches),
+                    MenuAction::Select(2) => Some(ConfigMenuAction::EditBranchMap),
+                    MenuAction::Select(3) => Some(ConfigMenuAction::ResetBranchMap),
+                    MenuAction::Select(4) => Some(ConfigMenuAction::Save),
+                    MenuAction::Select(5) => Some(ConfigMenuAction::Back),
+                    MenuAction::Back => Some(ConfigMenuAction::Back),
+                    MenuAction::Quit => Some(ConfigMenuAction::Quit),
                     _ => None,
                 });
             }
@@ -1429,6 +1639,97 @@ impl App {
         ])
     }
 
+    fn config_merge_middle_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改 merge_branch_middle",
+            "合并分支中间名",
+            "例如 henry 或 PROJECT_NAME",
+        );
+        state.value = self.config.project.merge_branch_middle.clone();
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_env_branches_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改环境分支列表",
+            "环境分支",
+            "例如 dev test uat stage prod",
+        );
+        state.value = self.config.project.env_branches.join(" ");
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_branch_map_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改 branch_map",
+            "分支映射",
+            "例如 dev_henry_meger->dev; test_henry_meger->test",
+        );
+        state.value = self
+            .branch_map_entries()
+            .into_iter()
+            .map(|(src, tgt)| format!("{src}->{tgt}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn parse_env_branches(value: &str) -> Result<Vec<String>> {
+        let branches: Vec<String> = value
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter_map(|part| {
+                let trimmed = part.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .collect();
+
+        if branches.is_empty() {
+            anyhow::bail!("至少需要一个环境分支");
+        }
+
+        Ok(branches)
+    }
+
+    fn parse_branch_map(value: &str) -> Result<HashMap<String, String>> {
+        let mut branch_map = HashMap::new();
+
+        for entry in value.split(';') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+
+            let (src, tgt) = entry.split_once("->").ok_or_else(|| {
+                anyhow::anyhow!("branch_map 格式不正确，请使用 src->target; src2->target2")
+            })?;
+            let src = src.trim();
+            let tgt = tgt.trim();
+            if src.is_empty() || tgt.is_empty() {
+                anyhow::bail!("branch_map 不能包含空的源分支或目标分支");
+            }
+            branch_map.insert(src.to_string(), tgt.to_string());
+        }
+
+        if branch_map.is_empty() {
+            anyhow::bail!("至少需要一组 branch_map 映射");
+        }
+
+        Ok(branch_map)
+    }
+
+    fn save_current_config(&self) -> Result<std::path::PathBuf> {
+        let path = Config::config_path();
+        self.config.validate()?;
+        self.config.save(&path)?;
+        Ok(path)
+    }
+
     fn execute_plan(&self, plan: &ExecutionPlan) -> Vec<(bool, String)> {
         match plan {
             ExecutionPlan::Sync { project_idx } => self.execute_sync(*project_idx),
@@ -1547,8 +1848,19 @@ fn centered_rect(
 // ---- Action enums ----
 
 enum MainMenuAction {
+    ConfigManage,
     LocalOps,
     GitLabMr,
+    Quit,
+}
+
+enum ConfigMenuAction {
+    EditMergeMiddle,
+    EditEnvBranches,
+    EditBranchMap,
+    ResetBranchMap,
+    Save,
+    Back,
     Quit,
 }
 

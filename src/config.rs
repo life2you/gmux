@@ -73,6 +73,10 @@ impl Config {
         Self::xdg_config_path()
     }
 
+    pub fn config_path() -> PathBuf {
+        Self::default_global_config_path()
+    }
+
     fn xdg_config_path() -> PathBuf {
         if let Ok(config_home) = std::env::var("XDG_CONFIG_HOME") {
             return PathBuf::from(config_home).join("gmux").join("gmux.toml");
@@ -106,7 +110,7 @@ impl Config {
         map
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let mut missing = Vec::new();
         if self.gitlab.host.is_empty() {
             missing.push("gitlab.host");
@@ -122,6 +126,24 @@ impl Config {
         }
         if !missing.is_empty() {
             bail!("配置缺少必填项: {}", missing.join(", "));
+        }
+        if self.project.env_branches.is_empty() {
+            bail!("project.env_branches 不能为空");
+        }
+        if self
+            .project
+            .env_branches
+            .iter()
+            .any(|branch| branch.trim().is_empty())
+        {
+            bail!("project.env_branches 不能包含空分支名");
+        }
+        if self
+            .branch_map
+            .iter()
+            .any(|(src, tgt)| src.trim().is_empty() || tgt.trim().is_empty())
+        {
+            bail!("branch_map 不能包含空的源分支或目标分支");
         }
         Ok(())
     }
@@ -142,6 +164,13 @@ impl Config {
             &self.project.merge_branch_middle
         };
         format!("{env_branch}_{middle}_meger")
+    }
+
+    pub fn regenerate_branch_map(&mut self) {
+        self.branch_map = Self::generate_default_branch_map(
+            &self.project.env_branches,
+            &self.project.merge_branch_middle,
+        );
     }
 
     pub fn run_init_wizard() -> Result<Self> {
