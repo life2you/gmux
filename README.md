@@ -10,6 +10,9 @@
 - Syncs a source branch across multiple environment branches
 - Supports single-target and custom multi-target merge flows
 - Creates GitLab merge requests from the terminal
+- Shows preflight checks and action previews before executing risky operations
+- Supports searchable selection menus and in-app help with `?`
+- Lets you manage branch settings, GitLab connection info, and project root directly inside the TUI
 - Uses a single global config file at `~/.config/gmux/gmux.toml`
 
 ## Project Layout
@@ -54,18 +57,30 @@ cargo build --release
 Example:
 
 ```toml
-gitlab_url = "https://gitlab.example.com"
-gitlab_token = "glpat-xxxx"
-group_name = "my-group"
+[gitlab]
+host = "gitlab.example.com:8099"
+token = "glpat-xxxx"
 
-[[projects]]
-name = "repo-a"
-path = "/Users/you/code/repo-a"
-development = "development"
-test = "test"
-pre_release = "pre-release"
-main = "main"
+[project]
+root_dir = "/Users/you/code"
+merge_branch_middle = "henry"
+env_branches = ["dev", "test", "uat", "stage", "prod"]
+
+[branch_map]
+"dev_henry_meger" = "dev"
+"test_henry_meger" = "test"
+"uat_henry_meger" = "uat"
+"stage_henry_meger" = "stage"
+"prod_henry_meger" = "prod"
 ```
+
+## TUI Highlights
+
+- Local workflows now include preview pages with branch existence, dirty working tree, detached HEAD, and ahead/behind checks before execution.
+- GitLab MR workflows also show a preview before sending API requests.
+- Search is available in the main selection flows. Press `/` to filter large project or branch lists.
+- Press `?` on supported screens to see contextual usage help inside the app.
+- `Config Management` lets you edit `project.root_dir`, `gitlab.host`, `gitlab.token`, `merge_branch_middle`, `env_branches`, and `branch_map` with immediate auto-save.
 
 ## Homebrew
 

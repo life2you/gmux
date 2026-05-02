@@ -1,6 +1,6 @@
 # gmux 配置文件
-# 复制此文件为 gmux.toml 并填入实际值
-# 也可以运行 `gmux init` 进入交互式初始化向导
+# 复制此文件到 ~/.config/gmux/gmux.toml 并填入实际值
+# 也可以直接运行 `gmux` 进入交互式初始化向导
 #
 # 配置文件固定位置：
 #   ~/.config/gmux/gmux.toml
@@ -24,10 +24,10 @@ env_branches = ["uat", "test", "stage", "pre_prod"]
 
 # MR 分支映射（可选）
 # 格式：源分支 = "目标分支"
-# 未配置时根据 env_branches 和 merge_branch_middle 自动生成
+# 未配置时会根据 env_branches 和 merge_branch_middle 自动生成
 # [branch_map]
+# "dev_henry_meger" = "dev"
 # "test_henry_meger" = "test"
 # "uat_henry_meger" = "uat"
 # "stage_henry_meger" = "stage"
 # "pre_prod_henry_meger" = "pre_prod"
-# "pre_prod" = "master"

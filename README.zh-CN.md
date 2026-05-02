@@ -10,6 +10,9 @@
 - 将源分支同步到多个环境分支
 - 支持单目标合并和自定义多目标合并
 - 可以直接在终端里创建 GitLab Merge Request
+- 在执行高风险操作前展示执行前检查和操作预览
+- 支持可搜索菜单，以及按 `?` 查看页内帮助
+- 可以直接在 TUI 中管理分支配置、GitLab 连接信息和项目根目录
 - 仅使用一个全局配置文件：`~/.config/gmux/gmux.toml`
 
 ## 项目结构
@@ -54,18 +57,30 @@ cargo build --release
 示例：
 
 ```toml
-gitlab_url = "https://gitlab.example.com"
-gitlab_token = "glpat-xxxx"
-group_name = "my-group"
+[gitlab]
+host = "gitlab.example.com:8099"
+token = "glpat-xxxx"
 
-[[projects]]
-name = "repo-a"
-path = "/Users/you/code/repo-a"
-development = "development"
-test = "test"
-pre_release = "pre-release"
-main = "main"
+[project]
+root_dir = "/Users/you/code"
+merge_branch_middle = "henry"
+env_branches = ["dev", "test", "uat", "stage", "prod"]
+
+[branch_map]
+"dev_henry_meger" = "dev"
+"test_henry_meger" = "test"
+"uat_henry_meger" = "uat"
+"stage_henry_meger" = "stage"
+"prod_henry_meger" = "prod"
 ```
+
+## TUI 亮点
+
+- 本地工作流在真正执行前会先显示预览页，包含分支存在性、工作区脏状态、detached HEAD、ahead/behind 等检查。
+- GitLab MR 工作流也会在真正发 API 请求前展示预览。
+- 主要选择流程都支持搜索，按 `/` 可以过滤项目或分支列表。
+- 在支持的页面按 `?` 可以直接查看当前页的使用说明。
+- `配置管理` 支持直接修改 `project.root_dir`、`gitlab.host`、`gitlab.token`、`merge_branch_middle`、`env_branches` 和 `branch_map`，改动会立即自动保存。
 
 ## Homebrew
 
