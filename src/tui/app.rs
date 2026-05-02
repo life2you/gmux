@@ -20,6 +20,12 @@ pub struct App {
     gitlab: GitLabClient,
 }
 
+#[derive(Clone)]
+struct BranchMapDraft {
+    original_source: Option<String>,
+    source_branch: String,
+}
+
 enum Page {
     MainMenu,
     ConfigMenu,
@@ -38,8 +44,12 @@ enum Page {
     ConfigBranchMapActions {
         source_branch: String,
     },
-    ConfigBranchMapInput {
+    ConfigBranchMapSourceInput {
         original_source: Option<String>,
+        state: InputState,
+    },
+    ConfigBranchMapTargetInput {
+        draft: BranchMapDraft,
         state: InputState,
     },
     ProjectSelect,
@@ -341,9 +351,9 @@ impl App {
                     let action = self.show_config_branch_map_menu(terminal)?;
                     match action {
                         Some(ConfigBranchMapMenuAction::Add) => {
-                            page_stack.push(Page::ConfigBranchMapInput {
+                            page_stack.push(Page::ConfigBranchMapSourceInput {
                                 original_source: None,
-                                state: self.config_branch_map_entry_input(None),
+                                state: self.config_branch_map_source_input(None),
                             });
                         }
                         Some(ConfigBranchMapMenuAction::Select(source_branch)) => {
@@ -362,10 +372,10 @@ impl App {
                     match action {
                         Some(ConfigBranchMapAction::Edit) => {
                             let input_source = selected_source.clone();
-                            page_stack.push(Page::ConfigBranchMapInput {
+                            page_stack.push(Page::ConfigBranchMapSourceInput {
                                 original_source: Some(selected_source),
                                 state: self
-                                    .config_branch_map_entry_input(Some(input_source.as_str())),
+                                    .config_branch_map_source_input(Some(input_source.as_str())),
                             });
                         }
                         Some(ConfigBranchMapAction::Delete) => {
@@ -382,24 +392,53 @@ impl App {
                         None => {}
                     }
                 }
-                Page::ConfigBranchMapInput {
+                Page::ConfigBranchMapSourceInput {
                     original_source,
                     state,
                 } => {
                     terminal.draw(|f| state.render(f))?;
                     match state.handle_key_event() {
                         Some(InputAction::Submit(value)) => {
-                            match Self::parse_branch_map_entry(&value) {
-                                Ok((src, tgt)) => {
-                                    if let Some(original) = original_source {
-                                        self.config.branch_map.remove(original);
-                                    }
-                                    self.config.branch_map.insert(src, tgt);
-                                    page_stack.pop();
+                            let source_branch = value.trim();
+                            if source_branch.is_empty() {
+                                state.error = Some("源分支不能为空".to_string());
+                            } else {
+                                let draft = BranchMapDraft {
+                                    original_source: original_source.clone(),
+                                    source_branch: source_branch.to_string(),
+                                };
+                                page_stack.push(Page::ConfigBranchMapTargetInput {
+                                    state: self.config_branch_map_target_input(
+                                        draft.original_source.as_deref(),
+                                        source_branch,
+                                    ),
+                                    draft,
+                                });
+                            }
+                        }
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigBranchMapTargetInput { draft, state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let target_branch = value.trim();
+                            if target_branch.is_empty() {
+                                state.error = Some("目标分支不能为空".to_string());
+                            } else {
+                                if let Some(original) = &draft.original_source {
+                                    self.config.branch_map.remove(original);
                                 }
-                                Err(err) => {
-                                    state.error = Some(err.to_string());
-                                }
+                                self.config
+                                    .branch_map
+                                    .insert(draft.source_branch.clone(), target_branch.to_string());
+                                page_stack.pop();
+                                page_stack.pop();
                             }
                         }
                         Some(InputAction::Back) => {
@@ -2017,31 +2056,38 @@ impl App {
         state
     }
 
-    fn config_branch_map_entry_input(&self, source_branch: Option<&str>) -> InputState {
+    fn config_branch_map_source_input(&self, source_branch: Option<&str>) -> InputState {
         let mut state = InputState::new(
             "gmux / 配置管理",
-            "逐条编辑 branch_map",
-            "单组映射",
-            "例如 dev_henry_meger -> dev",
+            "编辑 branch_map / 第一步",
+            "源分支",
+            "例如 pre_prod 或 uat_henry_meger",
         );
         if let Some(src) = source_branch {
-            let tgt = self.config.branch_map.get(src).cloned().unwrap_or_default();
-            state.value = format!("{src} -> {tgt}");
+            state.value = src.to_string();
         }
         state.cursor_pos = state.value.len();
         state
     }
 
-    fn parse_branch_map_entry(value: &str) -> Result<(String, String)> {
-        let (src, tgt) = value
-            .split_once("->")
-            .ok_or_else(|| anyhow::anyhow!("请使用 `source -> target` 的格式"))?;
-        let src = src.trim();
-        let tgt = tgt.trim();
-        if src.is_empty() || tgt.is_empty() {
-            anyhow::bail!("source 和 target 都不能为空");
+    fn config_branch_map_target_input(
+        &self,
+        original_source: Option<&str>,
+        source_branch: &str,
+    ) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            &format!("编辑 branch_map / 第二步  [源分支: {source_branch}]"),
+            "目标分支",
+            "例如 master / stage / prod",
+        );
+        if let Some(original_source) = original_source {
+            if let Some(target) = self.config.branch_map.get(original_source) {
+                state.value = target.clone();
+            }
         }
-        Ok((src.to_string(), tgt.to_string()))
+        state.cursor_pos = state.value.len();
+        state
     }
 
     fn save_current_config(&self) -> Result<std::path::PathBuf> {
