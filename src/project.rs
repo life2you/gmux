@@ -7,38 +7,73 @@ use crate::git::{self, MergeResult};
 #[derive(Debug, Clone)]
 pub struct Project {
     pub name: String,
+    pub display_name: String,
     pub path: PathBuf,
+    pub source_root: PathBuf,
 }
 
-pub fn scan_projects(root_dir: &str) -> Result<Vec<Project>> {
-    let root = Path::new(root_dir);
-    if !root.is_dir() {
-        bail!("项目根目录不存在: {root_dir}");
+pub fn scan_projects(root_dirs: &[String]) -> Result<Vec<Project>> {
+    if root_dirs.is_empty() {
+        bail!("至少需要配置一个项目根目录");
     }
 
+    let mut seen = std::collections::HashSet::new();
     let mut projects = Vec::new();
+    for root_dir in root_dirs {
+        let root = Path::new(root_dir);
+        if !root.is_dir() {
+            bail!("项目根目录不存在: {root_dir}");
+        }
 
-    let entries = std::fs::read_dir(root)?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+        let entries = std::fs::read_dir(root)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if !path.join(".git").is_dir() {
+                continue;
+            }
+            let canonical = path.canonicalize()?;
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            let name = canonical
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            projects.push(Project {
+                display_name: name.clone(),
+                name,
+                path: canonical,
+                source_root: root.to_path_buf(),
+            });
         }
-        if !path.join(".git").is_dir() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        projects.push(Project { name, path });
     }
 
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+
+    let mut counts = std::collections::HashMap::new();
+    for project in &projects {
+        *counts.entry(project.name.clone()).or_insert(0usize) += 1;
+    }
+    for project in &mut projects {
+        if counts.get(&project.name).copied().unwrap_or(0) > 1 {
+            let source_name = project
+                .source_root
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| project.source_root.display().to_string());
+            project.display_name = format!("{} ({})", project.name, source_name);
+        }
+    }
 
     if projects.is_empty() {
-        bail!("在目录 {root_dir} 中未找到任何 Git 仓库");
+        bail!(
+            "在这些目录中未找到任何 Git 仓库: {}",
+            root_dirs.join(" | ")
+        );
     }
 
     Ok(projects)
@@ -170,4 +205,40 @@ pub fn get_target_merge_branches(config: &Config, project_name: &str) -> Vec<(St
             (env.clone(), merge_branch)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn scan_projects_across_multiple_roots() {
+        let base = std::env::temp_dir().join(format!(
+            "gmux-project-scan-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be valid")
+                .as_nanos()
+        ));
+        let root_a = base.join("code-a");
+        let root_b = base.join("code-b");
+        let alpha = root_a.join("alpha");
+        let beta = root_b.join("beta");
+
+        std::fs::create_dir_all(alpha.join(".git")).expect("alpha .git should exist");
+        std::fs::create_dir_all(beta.join(".git")).expect("beta .git should exist");
+
+        let projects = scan_projects(&[
+            root_a.display().to_string(),
+            root_b.display().to_string(),
+        ])
+        .expect("scan should succeed");
+
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].name, "alpha");
+        assert_eq!(projects[1].name, "beta");
+
+        std::fs::remove_dir_all(base).expect("temp dir should be removed");
+    }
 }

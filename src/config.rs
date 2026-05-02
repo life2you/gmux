@@ -26,7 +26,8 @@ pub struct GitLabConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
-    pub root_dir: String,
+    #[serde(default)]
+    pub root_dirs: Vec<String>,
     pub merge_branch_middle: String,
     #[serde(default = "default_env_branches")]
     pub env_branches: Vec<String>,
@@ -49,8 +50,8 @@ impl Config {
             Some(path) => {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("无法读取配置文件: {}", path.display()))?;
-                let mut config: Config =
-                    toml::from_str(&content).with_context(|| "配置文件解析失败")?;
+                let value: toml::Value = toml::from_str(&content).with_context(|| "配置文件解析失败")?;
+                let mut config = Self::parse(value)?;
                 config.ensure_branch_map();
                 config.validate()?;
                 Ok(config)
@@ -118,14 +119,22 @@ impl Config {
         if self.gitlab.token.is_empty() {
             missing.push("gitlab.token");
         }
-        if self.project.root_dir.is_empty() {
-            missing.push("project.root_dir");
+        if self.project.root_dirs.is_empty() {
+            missing.push("project.root_dirs");
         }
         if self.project.merge_branch_middle.is_empty() {
             missing.push("project.merge_branch_middle");
         }
         if !missing.is_empty() {
             bail!("配置缺少必填项: {}", missing.join(", "));
+        }
+        if self
+            .project
+            .root_dirs
+            .iter()
+            .any(|root| root.trim().is_empty())
+        {
+            bail!("project.root_dirs 不能包含空目录");
         }
         if self.project.env_branches.is_empty() {
             bail!("project.env_branches 不能为空");
@@ -173,6 +182,45 @@ impl Config {
         );
     }
 
+    fn parse(value: toml::Value) -> Result<Self> {
+        #[derive(Debug, Deserialize)]
+        struct ConfigCompat {
+            gitlab: GitLabConfig,
+            project: ProjectConfigCompat,
+            #[serde(default)]
+            branch_map: HashMap<String, String>,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct ProjectConfigCompat {
+            #[serde(default)]
+            root_dirs: Vec<String>,
+            #[serde(default)]
+            root_dir: Option<String>,
+            merge_branch_middle: String,
+            #[serde(default = "default_env_branches")]
+            env_branches: Vec<String>,
+        }
+
+        let compat: ConfigCompat = value.try_into().with_context(|| "配置文件解析失败")?;
+        let mut root_dirs = compat.project.root_dirs;
+        if root_dirs.is_empty() {
+            if let Some(root_dir) = compat.project.root_dir {
+                root_dirs.push(root_dir);
+            }
+        }
+
+        Ok(Self {
+            gitlab: compat.gitlab,
+            project: ProjectConfig {
+                root_dirs,
+                merge_branch_middle: compat.project.merge_branch_middle,
+                env_branches: compat.project.env_branches,
+            },
+            branch_map: compat.branch_map,
+        })
+    }
+
     pub fn run_init_wizard() -> Result<Self> {
         println!("\n\x1b[1m\x1b[38;5;81m══════════════════════════════════════\x1b[0m");
         println!("\x1b[1m\x1b[0;36m  gmux 初始化配置向导\x1b[0m");
@@ -192,7 +240,7 @@ impl Config {
         let config = Config {
             gitlab: GitLabConfig { host, token },
             project: ProjectConfig {
-                root_dir,
+                root_dirs: vec![root_dir],
                 merge_branch_middle,
                 env_branches,
             },
@@ -206,7 +254,7 @@ impl Config {
             "  gitlab.token          = {}****",
             &config.gitlab.token[..config.gitlab.token.len().min(8)]
         );
-        println!("  project.root_dir      = {}", config.project.root_dir);
+        println!("  project.root_dirs     = {:?}", config.project.root_dirs);
         println!(
             "  merge_branch_middle   = {}",
             config.project.merge_branch_middle
@@ -229,6 +277,32 @@ impl Config {
         );
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_legacy_single_root_config() {
+        let value: toml::Value = toml::from_str(
+            r#"
+[gitlab]
+host = "gitlab.example.com"
+token = "glpat-xxxx"
+
+[project]
+root_dir = "/tmp/code"
+merge_branch_middle = "henry"
+env_branches = ["dev", "test"]
+"#,
+        )
+        .expect("toml should parse");
+
+        let config = Config::parse(value).expect("legacy config should parse");
+        assert_eq!(config.project.root_dirs, vec!["/tmp/code".to_string()]);
+        assert_eq!(config.project.merge_branch_middle, "henry");
     }
 }
 
