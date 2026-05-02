@@ -53,22 +53,27 @@ enum Page {
         project_id: u64,
         project_name: String,
     },
+    BranchMapMultiSelect {
+        project_id: u64,
+        project_name: String,
+        state: ChecklistState,
+        mappings: Vec<(String, String)>,
+    },
 }
 
 #[derive(Clone)]
 enum LocalOp {
     Sync,
     MergeAll,
-    MergeFixed,
-    MergeCustom,
     MergeSingle,
+    MergeCustom,
 }
 
 #[derive(Clone)]
 enum MrMode {
     Single,
     Batch,
-    FixedThree,
+    BatchCustom,
 }
 
 #[derive(Clone)]
@@ -88,11 +93,6 @@ enum ExecutionPlan {
         target_branch: String,
     },
     MrBatch {
-        project_id: u64,
-        project_name: String,
-        mappings: Vec<(String, String)>,
-    },
-    MrFixedThree {
         project_id: u64,
         project_name: String,
         mappings: Vec<(String, String)>,
@@ -315,6 +315,7 @@ impl App {
                                     | Some(Page::SourceBranch { .. })
                                     | Some(Page::LocalOperation { .. })
                                     | Some(Page::BranchMapSelect { .. })
+                                    | Some(Page::BranchMapMultiSelect { .. })
                                     | Some(Page::GitLabProjectSelect { .. })
                             ) {
                                 page_stack.pop();
@@ -336,9 +337,9 @@ impl App {
                                 mr_mode: MrMode::Batch,
                             });
                         }
-                        Some(MrMenuAction::FixedThree) => {
+                        Some(MrMenuAction::BatchCustom) => {
                             page_stack.push(Page::GitLabProjectSelect {
-                                mr_mode: MrMode::FixedThree,
+                                mr_mode: MrMode::BatchCustom,
                             });
                         }
                         Some(MrMenuAction::Back) => {
@@ -354,10 +355,7 @@ impl App {
                         Ok(action) => action,
                         Err(err) => {
                             page_stack.push(Page::ExecuteResult {
-                                lines: vec![(
-                                    false,
-                                    format!("加载 GitLab 项目列表失败: {err:#}"),
-                                )],
+                                lines: vec![(false, format!("加载 GitLab 项目列表失败: {err:#}"))],
                             });
                             continue;
                         }
@@ -375,17 +373,16 @@ impl App {
                                     plan: ExecutionPlan::MrBatch {
                                         project_id: id,
                                         project_name: name.clone(),
-                                        mappings: self.branch_map_without_master(),
+                                        mappings: self.branch_map_entries(),
                                     },
                                 });
                             }
-                            MrMode::FixedThree => {
-                                page_stack.push(Page::ExecutionPreview {
-                                    plan: ExecutionPlan::MrFixedThree {
-                                        project_id: id,
-                                        project_name: name.clone(),
-                                        mappings: self.fixed_three_mappings(),
-                                    },
+                            MrMode::BatchCustom => {
+                                page_stack.push(Page::BranchMapMultiSelect {
+                                    project_id: id,
+                                    project_name: name.clone(),
+                                    state: self.branch_map_multi_state(),
+                                    mappings: self.branch_map_entries(),
                                 });
                             }
                         },
@@ -418,6 +415,37 @@ impl App {
                             page_stack.pop();
                         }
                         Some(BranchMapAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::BranchMapMultiSelect {
+                    project_id,
+                    project_name,
+                    state,
+                    mappings,
+                } => {
+                    let pid = *project_id;
+                    let pname = project_name.clone();
+                    let mapping_options = mappings.clone();
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(ChecklistAction::Submit(indexes)) => {
+                            let selected_mappings: Vec<(String, String)> = indexes
+                                .into_iter()
+                                .filter_map(|index| mapping_options.get(index).cloned())
+                                .collect();
+                            page_stack.push(Page::ExecutionPreview {
+                                plan: ExecutionPlan::MrBatch {
+                                    project_id: pid,
+                                    project_name: pname,
+                                    mappings: selected_mappings,
+                                },
+                            });
+                        }
+                        Some(ChecklistAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ChecklistAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -521,26 +549,21 @@ impl App {
         let items = vec![
             format!("同步 {env_count} 个环境分支并推送到对应合并分支"),
             format!("将指定分支合并到全部 {env_count} 个目标合并分支"),
-            format!(
-                "将指定分支合并到 {} 个目标合并分支",
-                env_count.saturating_sub(1)
-            ),
-            "自定义选择多个目标合并分支".to_string(),
             "将指定分支合并到单个目标合并分支".to_string(),
+            "自定义选择多个目标合并分支".to_string(),
         ];
         let details = vec![
             vec!["依次更新各环境分支，再同步到对应合并分支并 push。".to_string()],
             vec!["从本地分支列表中选择源分支，再合并到所有目标合并分支并分别 push。".to_string()],
-            vec!["从本地分支列表中选择源分支，合并到除最后一个以外的目标合并分支。".to_string()],
-            vec!["从目标分支列表中手动勾选多个环境分支，适合灰度或局部回合并。".to_string()],
             vec!["先选择源分支，再选择一个目标合并分支进行 merge + push。".to_string()],
+            vec!["从目标分支列表中手动勾选多个环境分支，适合灰度或局部回合并。".to_string()],
         ];
 
         let mut menu = MenuState::new("gmux / 本地操作", "上下选择操作类型，Enter 确认", items)
             .with_details(details)
             .with_help(vec![
                 "同步：更新各环境分支，再同步到对应合并分支并 push。".to_string(),
-                "批量合并：选择一个源分支后，将其 merge 到多个目标合并分支。".to_string(),
+                "批量合并：选择一个源分支后，将其 merge 到全部目标合并分支。".to_string(),
                 "自定义多选：适合灰度、局部回合并或临时只处理部分环境。".to_string(),
             ]);
 
@@ -550,9 +573,8 @@ impl App {
                 return Ok(match action {
                     MenuAction::Select(0) => Some(LocalOpAction::Select(LocalOp::Sync)),
                     MenuAction::Select(1) => Some(LocalOpAction::Select(LocalOp::MergeAll)),
-                    MenuAction::Select(2) => Some(LocalOpAction::Select(LocalOp::MergeFixed)),
+                    MenuAction::Select(2) => Some(LocalOpAction::Select(LocalOp::MergeSingle)),
                     MenuAction::Select(3) => Some(LocalOpAction::Select(LocalOp::MergeCustom)),
-                    MenuAction::Select(4) => Some(LocalOpAction::Select(LocalOp::MergeSingle)),
                     MenuAction::Back => Some(LocalOpAction::Back),
                     MenuAction::Quit => Some(LocalOpAction::Quit),
                     _ => None,
@@ -891,20 +913,16 @@ impl App {
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<MrMenuAction>> {
-        let env_count = self.config.project.env_branches.len();
         let items = vec![
             "单个创建".to_string(),
-            "批量创建（排除最后一组映射）".to_string(),
-            format!("批量创建（前 {} 组映射）", env_count.saturating_sub(1)),
+            format!("批量创建（全部 {} 组映射）", self.config.branch_map.len()),
+            "自定义选择多组映射".to_string(),
             "返回主菜单".to_string(),
         ];
         let details = vec![
             vec!["先选项目，再选一组源/目标分支映射，创建一个 MR。".to_string()],
-            vec!["对一个项目批量创建多组 MR，并自动尝试审批和合并。".to_string()],
-            vec![format!(
-                "只批量创建前 {} 组固定映射的 MR，并自动尝试审批和合并。",
-                env_count.saturating_sub(1)
-            )],
+            vec!["按配置中的 branch_map，对一个项目批量创建全部映射对应的 MR，并自动尝试审批和合并。".to_string()],
+            vec!["从 branch_map 中手动勾选部分映射，适合只处理部分环境或临时链路。".to_string()],
             vec!["不执行 MR 操作。".to_string()],
         ];
 
@@ -912,8 +930,9 @@ impl App {
             .with_details(details)
             .with_help(vec![
                 "单个创建：手动选一组源/目标分支映射创建 MR。".to_string(),
-                "批量创建：按分支映射批量创建 MR，并对成功的 MR 自动尝试审批与合并。".to_string(),
-                "固定映射：只处理前 N 组固定环境映射，适合标准发布链路。".to_string(),
+                "批量创建：按配置中的全部分支映射批量创建 MR，并对成功的 MR 自动尝试审批与合并。"
+                    .to_string(),
+                "自定义多选：只处理你本次勾选的映射，适合非标准发布链路。".to_string(),
             ]);
 
         loop {
@@ -922,7 +941,7 @@ impl App {
                 return Ok(match action {
                     MenuAction::Select(0) => Some(MrMenuAction::Single),
                     MenuAction::Select(1) => Some(MrMenuAction::Batch),
-                    MenuAction::Select(2) => Some(MrMenuAction::FixedThree),
+                    MenuAction::Select(2) => Some(MrMenuAction::BatchCustom),
                     MenuAction::Select(3) => Some(MrMenuAction::Back),
                     MenuAction::Back => Some(MrMenuAction::Back),
                     MenuAction::Quit => Some(MrMenuAction::Quit),
@@ -1060,13 +1079,7 @@ impl App {
                 .into_iter()
                 .map(|(_, branch)| branch)
                 .collect(),
-            LocalOp::MergeFixed => {
-                project::get_fixed_target_merge_branches(&self.config, &project.name)
-                    .into_iter()
-                    .map(|(_, branch)| branch)
-                    .collect()
-            }
-            LocalOp::MergeCustom | LocalOp::MergeSingle | LocalOp::Sync => Vec::new(),
+            LocalOp::MergeSingle | LocalOp::MergeCustom | LocalOp::Sync => Vec::new(),
         }
     }
 
@@ -1201,31 +1214,6 @@ impl App {
                     lines,
                 )
             }
-            ExecutionPlan::MrFixedThree {
-                project_id,
-                project_name,
-                mappings,
-            } => {
-                let mut lines = vec![
-                    format!("GitLab 项目: {project_name}"),
-                    format!("项目 ID: {project_id}"),
-                    format!("固定映射 MR 数量: {}", mappings.len()),
-                    String::new(),
-                    "即将执行以下步骤:".to_string(),
-                ];
-                for (src, tgt) in mappings {
-                    lines.push(format!("- 创建 MR: `{src}` -> `{tgt}`"));
-                }
-                lines.push("- 对创建成功的 MR 继续自动审批并尝试自动合并".to_string());
-                lines.push(String::new());
-                lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
-
-                (
-                    "gmux / 执行预览".to_string(),
-                    "确认固定映射 GitLab MR 的创建与后续动作".to_string(),
-                    lines,
-                )
-            }
         }
     }
 
@@ -1357,20 +1345,10 @@ impl App {
                 "如果其中某组失败，不会阻止其它组继续执行。".to_string(),
                 "预览页会先列出这次计划处理的全部映射关系。".to_string(),
             ],
-            ExecutionPlan::MrFixedThree { .. } => vec![
-                "固定映射 MR 只会处理前 N 组标准环境映射。".to_string(),
-                "执行顺序与批量 MR 相同：先创建，再对成功的 MR 自动尝试审批与合并。".to_string(),
-                "如果你只想处理部分环境，建议使用单个 MR 或后续扩展的自定义能力。".to_string(),
-            ],
         }
     }
 
-    fn render_help_overlay(
-        &self,
-        frame: &mut ratatui::Frame,
-        title: &str,
-        lines: &[String],
-    ) {
+    fn render_help_overlay(&self, frame: &mut ratatui::Frame, title: &str, lines: &[String]) {
         use ratatui::{
             style::{Color, Modifier, Style},
             text::{Line, Span},
@@ -1416,26 +1394,39 @@ impl App {
         );
     }
 
-    fn branch_map_without_master(&self) -> Vec<(String, String)> {
+    fn branch_map_entries(&self) -> Vec<(String, String)> {
         let mut mappings: Vec<(String, String)> = self
             .config
             .branch_map
             .iter()
-            .filter(|(_, tgt)| tgt.as_str() != "master")
             .map(|(src, tgt)| (src.clone(), tgt.clone()))
             .collect();
-        mappings.sort_by(|a, b| a.0.cmp(&b.0));
+        mappings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         mappings
     }
 
-    fn fixed_three_mappings(&self) -> Vec<(String, String)> {
-        let env_branches = &self.config.project.env_branches;
-        let middle = &self.config.project.merge_branch_middle;
-        let count = env_branches.len().saturating_sub(1);
-        env_branches[..count]
+    fn branch_map_multi_state(&self) -> ChecklistState {
+        let mappings = self.branch_map_entries();
+        let items: Vec<String> = mappings
             .iter()
-            .map(|env| (format!("{env}_{middle}_meger"), env.clone()))
-            .collect()
+            .map(|(src, tgt)| format!("{src} -> {tgt}"))
+            .collect();
+        let details: Vec<Vec<String>> = mappings
+            .iter()
+            .map(|(src, tgt)| vec![format!("源分支: {src}"), format!("目标分支: {tgt}")])
+            .collect();
+
+        ChecklistState::new(
+            "gmux / 分支映射多选",
+            "空格勾选多组映射，Enter 进入执行预览",
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "这里展示配置文件 branch_map 中的全部映射关系。".to_string(),
+            "用空格勾选一组或多组映射，适合只处理部分环境或临时链路。".to_string(),
+            "Enter 后会先进入执行预览，不会立刻请求 GitLab API。".to_string(),
+        ])
     }
 
     fn execute_plan(&self, plan: &ExecutionPlan) -> Vec<(bool, String)> {
@@ -1455,13 +1446,8 @@ impl App {
             ExecutionPlan::MrBatch {
                 project_id,
                 project_name,
-                ..
-            } => self.execute_mr_batch(*project_id, project_name),
-            ExecutionPlan::MrFixedThree {
-                project_id,
-                project_name,
-                ..
-            } => self.execute_mr_fixed_three(*project_id, project_name),
+                mappings,
+            } => self.execute_mr_batch(*project_id, project_name, mappings),
         }
     }
 
@@ -1492,14 +1478,20 @@ impl App {
         results
     }
 
-    fn execute_mr_batch(&self, project_id: u64, project_name: &str) -> Vec<(bool, String)> {
+    fn execute_mr_batch(
+        &self,
+        project_id: u64,
+        project_name: &str,
+        mappings: &[(String, String)],
+    ) -> Vec<(bool, String)> {
         let mut results = Vec::new();
         let mut mr_list: Vec<(u64, String, String)> = Vec::new();
 
-        for (src, tgt) in &self.config.branch_map {
-            if tgt == "master" {
-                continue;
-            }
+        if mappings.is_empty() {
+            return vec![(false, "未选择任何分支映射".to_string())];
+        }
+
+        for (src, tgt) in mappings {
             match self.gitlab.create_mr(project_id, project_name, src, tgt) {
                 Ok(mr) => {
                     results.push((
@@ -1524,44 +1516,13 @@ impl App {
 
         results
     }
-
-    fn execute_mr_fixed_three(&self, project_id: u64, project_name: &str) -> Vec<(bool, String)> {
-        let mut results = Vec::new();
-        let env_branches = &self.config.project.env_branches;
-        let middle = &self.config.project.merge_branch_middle;
-        let mut mr_list: Vec<(u64, String, String)> = Vec::new();
-
-        let count = env_branches.len().saturating_sub(1);
-        for env in &env_branches[..count] {
-            let src = format!("{env}_{middle}_meger");
-            let tgt = env.clone();
-
-            match self.gitlab.create_mr(project_id, project_name, &src, &tgt) {
-                Ok(mr) => {
-                    results.push((
-                        true,
-                        format!("MR 创建成功: {src} -> {tgt} (IID: {})", mr.iid),
-                    ));
-                    mr_list.push((mr.iid, src, tgt));
-                }
-                Err(e) => {
-                    results.push((false, format!("创建 MR 失败 {src} -> {tgt}: {e}")));
-                }
-            }
-        }
-
-        for (iid, src, tgt) in &mr_list {
-            match self.gitlab.approve_and_merge(project_id, *iid) {
-                Ok(()) => results.push((true, format!("已审批并合并: {src} -> {tgt}"))),
-                Err(e) => results.push((false, format!("审批/合并失败 {src} -> {tgt}: {e}"))),
-            }
-        }
-
-        results
-    }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout};
 
     let popup_layout = Layout::default()
@@ -1628,7 +1589,7 @@ enum ResultAction {
 enum MrMenuAction {
     Single,
     Batch,
-    FixedThree,
+    BatchCustom,
     Back,
     Quit,
 }

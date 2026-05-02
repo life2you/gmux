@@ -117,9 +117,7 @@ fn sync_to_merge_branch(repo_path: &Path, source: &str, merge_branch: &str) -> R
             git::push(repo_path, merge_branch)?;
             Ok(format!("同步完成: {source} -> {merge_branch}"))
         }
-        MergeResult::AlreadyUpToDate => {
-            Ok(format!("已是最新: {source} -> {merge_branch}"))
-        }
+        MergeResult::AlreadyUpToDate => Ok(format!("已是最新: {source} -> {merge_branch}")),
         MergeResult::Conflict { files } => {
             let file_list = if files.is_empty() {
                 "（无法获取冲突文件）".to_string()
@@ -166,23 +164,6 @@ pub fn get_target_merge_branches(config: &Config, project_name: &str) -> Vec<(St
     config
         .project
         .env_branches
-        .iter()
-        .map(|env| {
-            let merge_branch = config.get_merge_branch_name(env, project_name);
-            (env.clone(), merge_branch)
-        })
-        .collect()
-}
-
-pub fn get_fixed_target_merge_branches(
-    config: &Config,
-    project_name: &str,
-) -> Vec<(String, String)> {
-    let branches = &config.project.env_branches;
-    if branches.len() <= 1 {
-        return Vec::new();
-    }
-    branches[..branches.len() - 1]
         .iter()
         .map(|env| {
             let merge_branch = config.get_merge_branch_name(env, project_name);

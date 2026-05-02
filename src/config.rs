@@ -103,7 +103,6 @@ impl Config {
             let src = format!("{env}_{merge_branch_middle}_meger");
             map.insert(src, env.clone());
         }
-        map.insert("pre_prod".to_string(), "master".to_string());
         map
     }
 
@@ -153,12 +152,13 @@ impl Config {
         let host = prompt_value("GitLab 服务器地址", "例如 gitlab.example.com:8099")?;
         let token = prompt_value("GitLab API Token", "例如 glpat-xxxxxxxxxxxx")?;
         let root_dir = prompt_directory("本地项目根目录（包含多个 Git 仓库的父目录）")?;
-        let merge_branch_middle =
-            prompt_value("合并分支中间名", "例如你的用户名，或输入 PROJECT_NAME 使用项目名")?;
+        let merge_branch_middle = prompt_value(
+            "合并分支中间名",
+            "例如你的用户名，或输入 PROJECT_NAME 使用项目名",
+        )?;
         let env_branches = prompt_env_branches()?;
 
-        let branch_map =
-            Self::generate_default_branch_map(&env_branches, &merge_branch_middle);
+        let branch_map = Self::generate_default_branch_map(&env_branches, &merge_branch_middle);
 
         let config = Config {
             gitlab: GitLabConfig { host, token },
@@ -230,7 +230,11 @@ fn prompt_directory(label: &str) -> Result<String> {
     result
 }
 
-fn browse_directory_loop(current: &mut PathBuf, selected: &mut usize, label: &str) -> Result<String> {
+fn browse_directory_loop(
+    current: &mut PathBuf,
+    selected: &mut usize,
+    label: &str,
+) -> Result<String> {
     loop {
         let mut entries: Vec<(String, bool)> = Vec::new(); // (name, is_dir)
 
@@ -265,7 +269,11 @@ fn browse_directory_loop(current: &mut PathBuf, selected: &mut usize, label: &st
 
         // Render
         let mut stdout = io::stdout();
-        execute!(stdout, terminal::Clear(ClearType::All), cursor::MoveTo(0, 0))?;
+        execute!(
+            stdout,
+            terminal::Clear(ClearType::All),
+            cursor::MoveTo(0, 0)
+        )?;
 
         println!("\x1b[38;5;81m══════════════════════════════════════\x1b[0m\r");
         println!("\x1b[1m\x1b[0;36m  {label}\x1b[0m\r");
@@ -357,10 +365,7 @@ fn browse_directory_loop(current: &mut PathBuf, selected: &mut usize, label: &st
                         terminal::Clear(ClearType::All),
                         cursor::MoveTo(0, 0)
                     )?;
-                    println!(
-                        "\x1b[0;32m  已选择:\x1b[0m {}\r",
-                        result.display()
-                    );
+                    println!("\x1b[0;32m  已选择:\x1b[0m {}\r", result.display());
                     return Ok(result.to_string_lossy().to_string());
                 }
                 KeyCode::Char('q') | KeyCode::Esc => {
@@ -373,7 +378,9 @@ fn browse_directory_loop(current: &mut PathBuf, selected: &mut usize, label: &st
 }
 
 fn prompt_env_branches() -> Result<Vec<String>> {
-    print!("\x1b[0;36m环境分支列表\x1b[0m \x1b[2m(空格分隔，回车使用默认值: uat test stage pre_prod)\x1b[0m\n> ");
+    print!(
+        "\x1b[0;36m环境分支列表\x1b[0m \x1b[2m(空格分隔，回车使用默认值: uat test stage pre_prod)\x1b[0m\n> "
+    );
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
@@ -385,9 +392,6 @@ fn prompt_env_branches() -> Result<Vec<String>> {
         input.split_whitespace().map(String::from).collect()
     };
 
-    println!(
-        "\x1b[0;32m  已设置环境分支:\x1b[0m {}",
-        branches.join(" ")
-    );
+    println!("\x1b[0;32m  已设置环境分支:\x1b[0m {}", branches.join(" "));
     Ok(branches)
 }
