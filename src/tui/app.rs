@@ -6,6 +6,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::path::Path;
+use std::process::Command;
 
 use crate::config::Config;
 use crate::git;
@@ -331,6 +332,14 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {
+                            if let Some(path) = Self::choose_folder_with_dialog("请选择项目根目录")
+                            {
+                                state.value = path;
+                                state.cursor_pos = state.value.len();
+                                state.error = None;
+                            }
+                        }
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -363,6 +372,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -395,6 +405,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -423,6 +434,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -609,6 +621,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -686,6 +699,7 @@ impl App {
                                 page_stack.push(Page::ConfigBranchMapTargetSelect { draft });
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -763,6 +777,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -2786,6 +2801,40 @@ impl App {
         Ok(canonical.display().to_string())
     }
 
+    fn choose_folder_with_dialog(prompt: &str) -> Option<String> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg("try")
+            .arg("-e")
+            .arg(format!(
+                "POSIX path of (choose folder with prompt \"{}\")",
+                prompt.replace('"', "\\\"")
+            ))
+            .arg("-e")
+            .arg("on error number -128")
+            .arg("-e")
+            .arg("return \"\"")
+            .arg("-e")
+            .arg("end try")
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
     fn dedupe_root_dirs(root_dirs: &mut Vec<String>) {
         let mut seen = std::collections::HashSet::new();
         root_dirs.retain(|root| seen.insert(root.clone()));
@@ -2805,7 +2854,8 @@ impl App {
             "新增或编辑一个项目根目录",
             "项目根目录",
             "例如 /Users/you/workspaces",
-        );
+        )
+        .with_file_picker();
         if let Some(index) = index {
             state.value = self
                 .config
