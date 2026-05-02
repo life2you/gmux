@@ -446,7 +446,8 @@ impl App {
             "选择一个本地 Git 仓库进行同步或合并操作",
             items,
         )
-        .with_details(details);
+        .with_details(details)
+        .with_search("输入项目名或路径关键词");
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -568,7 +569,8 @@ impl App {
             "选择一个本地分支作为源分支",
             branches.clone(),
         )
-        .with_details(details);
+        .with_details(details)
+        .with_search("输入分支关键词");
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -656,7 +658,8 @@ impl App {
             .collect();
 
         let mut menu = MenuState::new("gmux / 目标分支", "选择一个目标合并分支", items.clone())
-            .with_details(details);
+            .with_details(details)
+            .with_search("输入环境名或目标分支关键词");
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -834,7 +837,8 @@ impl App {
             "选择一个 GitLab 项目用于创建 MR",
             items,
         )
-        .with_details(details);
+        .with_details(details)
+        .with_search("输入项目名或 ID 关键词");
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -873,7 +877,8 @@ impl App {
             .collect();
 
         let mut menu = MenuState::new("gmux / 分支映射", "选择源分支与目标分支的映射关系", items)
-            .with_details(details);
+            .with_details(details)
+            .with_search("输入源分支或目标分支关键词");
 
         loop {
             terminal.draw(|f| menu.render(f))?;
