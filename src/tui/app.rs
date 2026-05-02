@@ -761,25 +761,25 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<MainMenuAction>> {
         let items = vec![
-            "配置管理".to_string(),
             "本地分支同步 / 合并（含推送）".to_string(),
             "GitLab MR 创建".to_string(),
+            "配置管理".to_string(),
             "退出程序".to_string(),
         ];
         let details = vec![
-            vec!["在 TUI 里直接修改分支相关配置，并保存到 ~/.config/gmux/gmux.toml。".to_string()],
             vec!["适合处理本地项目的环境分支同步、批量合并、单分支合并和推送。".to_string()],
             vec!["适合直接创建单个或批量 Merge Request，并支持后续审批合并。".to_string()],
+            vec!["在 TUI 里直接修改分支相关配置，并保存到 ~/.config/gmux/gmux.toml。".to_string()],
             vec!["结束 gmux。".to_string()],
         ];
 
         let mut menu = MenuState::new("gmux", "终端 Git 工作流工具", items)
             .with_details(details)
             .with_help(vec![
-                "配置管理：可以直接在界面里调整 merge_branch_middle、env_branches 和 branch_map，并保存配置。".to_string(),
                 "本地分支同步 / 合并：用于本地仓库的环境分支同步、批量 merge 和 push。".to_string(),
                 "GitLab MR 创建：用于创建单个或批量 Merge Request，并在成功后自动尝试审批与合并。"
                     .to_string(),
+                "配置管理：可以直接在界面里调整 merge_branch_middle、env_branches 和 branch_map，并保存配置。".to_string(),
                 "按 Enter 进入当前选中的功能，按 b 或 Esc 返回，按 q 退出程序。".to_string(),
             ]);
 
@@ -787,9 +787,9 @@ impl App {
             terminal.draw(|f| menu.render(f))?;
             if let Some(action) = menu.handle_key_event() {
                 return Ok(match action {
-                    MenuAction::Select(0) => Some(MainMenuAction::ConfigManage),
-                    MenuAction::Select(1) => Some(MainMenuAction::LocalOps),
-                    MenuAction::Select(2) => Some(MainMenuAction::GitLabMr),
+                    MenuAction::Select(0) => Some(MainMenuAction::LocalOps),
+                    MenuAction::Select(1) => Some(MainMenuAction::GitLabMr),
+                    MenuAction::Select(2) => Some(MainMenuAction::ConfigManage),
                     MenuAction::Select(3) | MenuAction::Back => Some(MainMenuAction::Quit),
                     MenuAction::Quit => Some(MainMenuAction::Quit),
                     _ => None,
