@@ -350,7 +350,18 @@ impl App {
                 }
                 Page::GitLabProjectSelect { mr_mode } => {
                     let mode = mr_mode.clone();
-                    let action = self.show_gitlab_project_select(terminal)?;
+                    let action = match self.show_gitlab_project_select(terminal) {
+                        Ok(action) => action,
+                        Err(err) => {
+                            page_stack.push(Page::ExecuteResult {
+                                lines: vec![(
+                                    false,
+                                    format!("加载 GitLab 项目列表失败: {err:#}"),
+                                )],
+                            });
+                            continue;
+                        }
+                    };
                     match action {
                         Some(GitLabAction::Select(id, name)) => match mode {
                             MrMode::Single => {

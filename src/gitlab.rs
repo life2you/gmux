@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 pub struct GitLabClient {
-    host: String,
+    base_url: String,
     token: String,
     client: reqwest::blocking::Client,
 }
@@ -25,14 +25,14 @@ pub struct MergeRequest {
 impl GitLabClient {
     pub fn new(host: &str, token: &str) -> Self {
         Self {
-            host: host.to_string(),
+            base_url: normalize_base_url(host),
             token: token.to_string(),
             client: reqwest::blocking::Client::new(),
         }
     }
 
     fn api_url(&self, path: &str) -> String {
-        format!("http://{}/api/v4{}", self.host, path)
+        format!("{}/api/v4{}", self.base_url, path)
     }
 
     pub fn list_projects(&self) -> Result<Vec<GitLabProject>> {
@@ -139,5 +139,14 @@ impl GitLabClient {
         } else {
             bail!("MR 合并状态异常: {state}");
         }
+    }
+}
+
+fn normalize_base_url(host: &str) -> String {
+    let trimmed = host.trim().trim_end_matches('/');
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
     }
 }
