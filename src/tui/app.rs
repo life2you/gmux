@@ -1,9 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 
 use crate::config::Config;
@@ -960,8 +960,11 @@ impl App {
                     format!("项目: {}", project.name),
                     format!("仓库路径: {}", project.path.display()),
                     String::new(),
-                    "即将执行以下步骤:".to_string(),
+                    "执行前检查:".to_string(),
                 ];
+                lines.extend(self.build_sync_preflight(*project_idx));
+                lines.push(String::new());
+                lines.push("即将执行以下步骤:".to_string());
                 for (env, merge) in project::get_target_merge_branches(&self.config, &project.name)
                 {
                     lines.push(format!("- 更新环境分支 `{env}` 并 pull 最新代码"));
@@ -988,8 +991,11 @@ impl App {
                     format!("源分支: {source_branch}"),
                     format!("目标分支数量: {}", targets.len()),
                     String::new(),
-                    "即将执行以下步骤:".to_string(),
+                    "执行前检查:".to_string(),
                 ];
+                lines.extend(self.build_merge_preflight(*project_idx, source_branch, targets));
+                lines.push(String::new());
+                lines.push("即将执行以下步骤:".to_string());
                 for target in targets {
                     lines.push(format!("- checkout `{target}`"));
                     lines.push(format!("- merge `{source_branch}` 到 `{target}`"));
@@ -1004,6 +1010,112 @@ impl App {
                     lines,
                 )
             }
+        }
+    }
+
+    fn build_sync_preflight(&self, project_idx: usize) -> Vec<String> {
+        let project = &self.projects[project_idx];
+        let mut lines = self.build_repo_preflight(project_idx);
+        for (env, merge) in project::get_target_merge_branches(&self.config, &project.name) {
+            lines.push(self.describe_branch_presence(
+                project_idx,
+                &env,
+                "环境分支",
+                "必须可更新并 pull",
+            ));
+            lines.push(self.describe_branch_presence(
+                project_idx,
+                &merge,
+                "目标合并分支",
+                "不存在时会在执行中创建",
+            ));
+        }
+        lines
+    }
+
+    fn build_merge_preflight(
+        &self,
+        project_idx: usize,
+        source_branch: &str,
+        targets: &[String],
+    ) -> Vec<String> {
+        let mut lines = self.build_repo_preflight(project_idx);
+        lines.push(self.describe_branch_presence(
+            project_idx,
+            source_branch,
+            "源分支",
+            "必须存在于本地",
+        ));
+        lines.push(self.describe_branch_tracking(project_idx, source_branch));
+        for target in targets {
+            lines.push(self.describe_branch_presence(
+                project_idx,
+                target,
+                "目标合并分支",
+                "不存在时会在执行中创建",
+            ));
+            lines.push(self.describe_branch_tracking(project_idx, target));
+        }
+        lines
+    }
+
+    fn build_repo_preflight(&self, project_idx: usize) -> Vec<String> {
+        let project = &self.projects[project_idx];
+        let mut lines = Vec::new();
+
+        match git::has_uncommitted_changes(&project.path) {
+            Ok(true) => lines.push(
+                "[WARN] 工作区存在未提交改动，切换/合并分支时可能失败或引入额外风险".to_string(),
+            ),
+            Ok(false) => lines.push("[OK] 工作区干净，没有未提交改动".to_string()),
+            Err(err) => lines.push(format!("[WARN] 无法检查工作区状态: {err}")),
+        }
+
+        match git::current_branch(&project.path) {
+            Ok(Some(branch)) => lines.push(format!("[OK] 当前检出分支: {branch}")),
+            Ok(None) => lines.push("[WARN] 当前仓库处于 detached HEAD".to_string()),
+            Err(err) => lines.push(format!("[WARN] 无法检测当前分支: {err}")),
+        }
+
+        lines
+    }
+
+    fn describe_branch_presence(
+        &self,
+        project_idx: usize,
+        branch: &str,
+        role: &str,
+        fallback_hint: &str,
+    ) -> String {
+        let project = &self.projects[project_idx];
+        let local = git::local_branch_exists(&project.path, branch);
+        let remote = git::remote_branch_exists(&project.path, branch);
+
+        match (local, remote) {
+            (true, true) => format!("[OK] {role} `{branch}` 已存在于本地和 origin"),
+            (true, false) => format!("[WARN] {role} `{branch}` 仅存在于本地，origin 上不存在"),
+            (false, true) => format!("[OK] {role} `{branch}` 仅存在于 origin，本地将在需要时检出"),
+            (false, false) => {
+                format!("[WARN] {role} `{branch}` 本地和 origin 都不存在，{fallback_hint}")
+            }
+        }
+    }
+
+    fn describe_branch_tracking(&self, project_idx: usize, branch: &str) -> String {
+        let project = &self.projects[project_idx];
+        match git::branch_ahead_behind(&project.path, branch) {
+            Ok(Some((0, 0))) => format!("[OK] 分支 `{branch}` 与 origin 保持同步"),
+            Ok(Some((ahead, 0))) => {
+                format!("[WARN] 分支 `{branch}` 比 origin 领先 {ahead} 个提交")
+            }
+            Ok(Some((0, behind))) => {
+                format!("[WARN] 分支 `{branch}` 比 origin 落后 {behind} 个提交")
+            }
+            Ok(Some((ahead, behind))) => {
+                format!("[WARN] 分支 `{branch}` 与 origin 已分叉：领先 {ahead}，落后 {behind}")
+            }
+            Ok(None) => format!("[INFO] 分支 `{branch}` 缺少本地或远端一侧，无法计算 ahead/behind"),
+            Err(err) => format!("[WARN] 无法检查分支 `{branch}` 的远端跟踪状态: {err}"),
         }
     }
 

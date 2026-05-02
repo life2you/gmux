@@ -50,18 +50,38 @@ pub fn list_local_branches(repo_path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-pub fn check_branch_exists(repo_path: &Path, branch: &str) -> bool {
-    let local = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+pub fn has_uncommitted_changes(repo_path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+        .context("执行 git status --porcelain 失败")?;
+
+    if !output.status.success() {
+        bail!(
+            "检查工作区状态失败: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+pub fn local_branch_exists(repo_path: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
         .current_dir(repo_path)
         .status()
         .map(|s| s.success())
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if local {
-        return true;
-    }
-
+pub fn remote_branch_exists(repo_path: &Path, branch: &str) -> bool {
     Command::new("git")
         .args([
             "show-ref",
@@ -73,6 +93,55 @@ pub fn check_branch_exists(repo_path: &Path, branch: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+pub fn check_branch_exists(repo_path: &Path, branch: &str) -> bool {
+    let local = local_branch_exists(repo_path, branch);
+
+    if local {
+        return true;
+    }
+
+    remote_branch_exists(repo_path, branch)
+}
+
+pub fn branch_ahead_behind(repo_path: &Path, branch: &str) -> Result<Option<(u32, u32)>> {
+    if !local_branch_exists(repo_path, branch) || !remote_branch_exists(repo_path, branch) {
+        return Ok(None);
+    }
+
+    let output = Command::new("git")
+        .args([
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{branch}...origin/{branch}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .context("执行 git rev-list --left-right --count 失败")?;
+
+    if !output.status.success() {
+        bail!(
+            "检查分支领先/落后状态失败 {branch}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = String::from_utf8_lossy(&output.stdout);
+    let mut parts = output.split_whitespace();
+    let ahead = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("ahead 计数缺失"))?
+        .parse::<u32>()
+        .context("解析 ahead 计数失败")?;
+    let behind = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("behind 计数缺失"))?
+        .parse::<u32>()
+        .context("解析 behind 计数失败")?;
+
+    Ok(Some((ahead, behind)))
 }
 
 pub fn checkout(repo_path: &Path, branch: &str) -> Result<()> {
