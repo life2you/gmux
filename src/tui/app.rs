@@ -29,12 +29,26 @@ struct BranchMapDraft {
 enum Page {
     MainMenu,
     ConfigMenu,
+    ConfigGitLabHostInput {
+        state: InputState,
+    },
+    ConfigGitLabTokenInput {
+        state: InputState,
+    },
+    ConfigProjectRootInput {
+        state: InputState,
+    },
     ConfigMergeMiddleInput {
         state: InputState,
     },
     ConfigEnvBranchesMenu,
     ConfigEnvBranchActions {
         index: usize,
+    },
+    ConfigEnvBranchDeleteConfirm {
+        index: usize,
+        branch: String,
+        linked_mappings: Vec<String>,
     },
     ConfigEnvBranchInput {
         index: Option<usize>,
@@ -48,9 +62,15 @@ enum Page {
         original_source: Option<String>,
         state: InputState,
     },
-    ConfigBranchMapTargetInput {
+    ConfigBranchMapTargetSelect {
+        draft: BranchMapDraft,
+    },
+    ConfigBranchMapTargetCustomInput {
         draft: BranchMapDraft,
         state: InputState,
+    },
+    ConfigBranchMapResetPreview {
+        mappings: Vec<(String, String)>,
     },
     ProjectSelect,
     LocalOperation {
@@ -186,6 +206,21 @@ impl App {
                 Page::ConfigMenu => {
                     let action = self.show_config_menu(terminal)?;
                     match action {
+                        Some(ConfigMenuAction::EditProjectRoot) => {
+                            page_stack.push(Page::ConfigProjectRootInput {
+                                state: self.config_project_root_input(),
+                            });
+                        }
+                        Some(ConfigMenuAction::EditGitLabHost) => {
+                            page_stack.push(Page::ConfigGitLabHostInput {
+                                state: self.config_gitlab_host_input(),
+                            });
+                        }
+                        Some(ConfigMenuAction::EditGitLabToken) => {
+                            page_stack.push(Page::ConfigGitLabTokenInput {
+                                state: self.config_gitlab_token_input(),
+                            });
+                        }
                         Some(ConfigMenuAction::EditMergeMiddle) => {
                             page_stack.push(Page::ConfigMergeMiddleInput {
                                 state: self.config_merge_middle_input(),
@@ -198,24 +233,106 @@ impl App {
                             page_stack.push(Page::ConfigBranchMapMenu);
                         }
                         Some(ConfigMenuAction::ResetBranchMap) => {
-                            match self.persist_config_change(|config| {
-                                config.regenerate_branch_map();
-                            }) {
-                                Ok(()) => {}
-                                Err(err) => {
-                                    page_stack.push(Page::ExecuteResult {
-                                        lines: vec![(
-                                            false,
-                                            format!("重建默认 branch_map 失败: {err:#}"),
-                                        )],
-                                    });
-                                }
-                            }
+                            page_stack.push(Page::ConfigBranchMapResetPreview {
+                                mappings: self.default_branch_map_entries(),
+                            });
                         }
                         Some(ConfigMenuAction::Back) => {
                             page_stack.pop();
                         }
                         Some(ConfigMenuAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigProjectRootInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let value = value.trim();
+                            if value.is_empty() {
+                                state.error = Some("项目根目录不能为空".to_string());
+                            } else {
+                                let new_value = value.to_string();
+                                match self.persist_config_change(|config| {
+                                    config.project.root_dir = new_value;
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
+                                    }
+                                }
+                            }
+                        }
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigGitLabHostInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let value = value.trim();
+                            if value.is_empty() {
+                                state.error = Some("GitLab 地址不能为空".to_string());
+                            } else {
+                                let new_value = value.to_string();
+                                match self.persist_config_change(|config| {
+                                    config.gitlab.host = new_value;
+                                }) {
+                                    Ok(()) => {
+                                        self.gitlab = GitLabClient::new(
+                                            &self.config.gitlab.host,
+                                            &self.config.gitlab.token,
+                                        );
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
+                                    }
+                                }
+                            }
+                        }
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigGitLabTokenInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let value = value.trim();
+                            if value.is_empty() {
+                                state.error = Some("GitLab Token 不能为空".to_string());
+                            } else {
+                                let new_value = value.to_string();
+                                match self.persist_config_change(|config| {
+                                    config.gitlab.token = new_value;
+                                }) {
+                                    Ok(()) => {
+                                        self.gitlab = GitLabClient::new(
+                                            &self.config.gitlab.host,
+                                            &self.config.gitlab.token,
+                                        );
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
+                                    }
+                                }
+                            }
+                        }
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -282,21 +399,14 @@ impl App {
                                     lines: vec![(false, "至少需要保留一个环境分支".to_string())],
                                 });
                             } else {
-                                match self.persist_config_change(|config| {
-                                    config.project.env_branches.remove(current_index);
-                                }) {
-                                    Ok(()) => {
-                                        page_stack.pop();
-                                    }
-                                    Err(err) => {
-                                        page_stack.push(Page::ExecuteResult {
-                                            lines: vec![(
-                                                false,
-                                                format!("删除环境分支失败: {err:#}"),
-                                            )],
-                                        });
-                                    }
-                                }
+                                let branch =
+                                    self.config.project.env_branches[current_index].clone();
+                                let linked_mappings = self.linked_branch_map_sources(&branch);
+                                page_stack.push(Page::ConfigEnvBranchDeleteConfirm {
+                                    index: current_index,
+                                    branch,
+                                    linked_mappings,
+                                });
                             }
                         }
                         Some(ConfigEnvBranchAction::MoveUp) => {
@@ -347,6 +457,63 @@ impl App {
                             page_stack.pop();
                         }
                         Some(ConfigEnvBranchAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigEnvBranchDeleteConfirm {
+                    index,
+                    branch,
+                    linked_mappings,
+                } => {
+                    let current_index = *index;
+                    let current_branch = branch.clone();
+                    let linked = linked_mappings.clone();
+                    let action = self.show_config_env_branch_delete_confirm(
+                        terminal,
+                        &current_branch,
+                        &linked,
+                    )?;
+                    match action {
+                        Some(ConfigEnvBranchDeleteConfirmAction::DeleteOnly) => {
+                            match self.persist_config_change(|config| {
+                                config.project.env_branches.remove(current_index);
+                            }) {
+                                Ok(()) => {
+                                    page_stack.pop();
+                                    page_stack.pop();
+                                }
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(false, format!("删除环境分支失败: {err:#}"))],
+                                    });
+                                }
+                            }
+                        }
+                        Some(ConfigEnvBranchDeleteConfirmAction::DeleteWithMappings) => {
+                            match self.persist_config_change(|config| {
+                                config.project.env_branches.remove(current_index);
+                                for source in &linked {
+                                    config.branch_map.remove(source);
+                                }
+                            }) {
+                                Ok(()) => {
+                                    page_stack.pop();
+                                    page_stack.pop();
+                                }
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(
+                                            false,
+                                            format!("删除环境分支及关联映射失败: {err:#}"),
+                                        )],
+                                    });
+                                }
+                            }
+                        }
+                        Some(ConfigEnvBranchDeleteConfirmAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigEnvBranchDeleteConfirmAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -450,13 +617,7 @@ impl App {
                                     original_source: original_source.clone(),
                                     source_branch: source_branch.to_string(),
                                 };
-                                page_stack.push(Page::ConfigBranchMapTargetInput {
-                                    state: self.config_branch_map_target_input(
-                                        draft.original_source.as_deref(),
-                                        source_branch,
-                                    ),
-                                    draft,
-                                });
+                                page_stack.push(Page::ConfigBranchMapTargetSelect { draft });
                             }
                         }
                         Some(InputAction::Back) => {
@@ -466,7 +627,49 @@ impl App {
                         None => {}
                     }
                 }
-                Page::ConfigBranchMapTargetInput { draft, state } => {
+                Page::ConfigBranchMapTargetSelect { draft } => {
+                    let current_draft = draft.clone();
+                    let action =
+                        self.show_config_branch_map_target_select(terminal, &current_draft)?;
+                    match action {
+                        Some(ConfigBranchMapTargetSelectAction::Select(target_branch)) => {
+                            let draft = current_draft.clone();
+                            match self.persist_config_change(|config| {
+                                if let Some(original) = &draft.original_source {
+                                    config.branch_map.remove(original);
+                                }
+                                config
+                                    .branch_map
+                                    .insert(draft.source_branch.clone(), target_branch);
+                            }) {
+                                Ok(()) => {
+                                    page_stack.pop();
+                                    page_stack.pop();
+                                }
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(false, format!("保存映射失败: {err:#}"))],
+                                    });
+                                }
+                            }
+                        }
+                        Some(ConfigBranchMapTargetSelectAction::CustomInput) => {
+                            page_stack.push(Page::ConfigBranchMapTargetCustomInput {
+                                state: self.config_branch_map_target_input(
+                                    current_draft.original_source.as_deref(),
+                                    &current_draft.source_branch,
+                                ),
+                                draft: current_draft,
+                            });
+                        }
+                        Some(ConfigBranchMapTargetSelectAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigBranchMapTargetSelectAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigBranchMapTargetCustomInput { draft, state } => {
                     terminal.draw(|f| state.render(f))?;
                     match state.handle_key_event() {
                         Some(InputAction::Submit(value)) => {
@@ -498,6 +701,34 @@ impl App {
                             page_stack.pop();
                         }
                         Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigBranchMapResetPreview { mappings } => {
+                    let preview = mappings.clone();
+                    let action = self.show_config_branch_map_reset_preview(terminal, &preview)?;
+                    match action {
+                        Some(ConfigBranchMapResetAction::Confirm) => {
+                            match self.persist_config_change(|config| {
+                                config.regenerate_branch_map();
+                            }) {
+                                Ok(()) => {
+                                    page_stack.pop();
+                                }
+                                Err(err) => {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(
+                                            false,
+                                            format!("重建默认 branch_map 失败: {err:#}"),
+                                        )],
+                                    });
+                                }
+                            }
+                        }
+                        Some(ConfigBranchMapResetAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigBranchMapResetAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -822,7 +1053,10 @@ impl App {
         let details = vec![
             vec!["适合处理本地项目的环境分支同步、批量合并、单分支合并和推送。".to_string()],
             vec!["适合直接创建单个或批量 Merge Request，并支持后续审批合并。".to_string()],
-            vec!["在 TUI 里直接修改分支相关配置，并保存到 ~/.config/gmux/gmux.toml。".to_string()],
+            vec![
+                "在 TUI 里直接修改分支相关配置，改动会自动写回 ~/.config/gmux/gmux.toml。"
+                    .to_string(),
+            ],
             vec!["结束 gmux。".to_string()],
         ];
 
@@ -856,10 +1090,13 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<ConfigMenuAction>> {
         let items = vec![
+            "修改项目根目录".to_string(),
+            "管理环境分支".to_string(),
+            "管理 MR 映射".to_string(),
             "修改合并分支中间名".to_string(),
-            "修改环境分支列表".to_string(),
-            "修改 branch_map".to_string(),
-            "根据当前环境分支重建默认 branch_map".to_string(),
+            "修改 GitLab 地址".to_string(),
+            "修改 GitLab Token".to_string(),
+            "预览并重建默认 MR 映射".to_string(),
             "返回主菜单".to_string(),
         ];
         let branch_map_preview = self.branch_map_entries();
@@ -874,8 +1111,8 @@ impl App {
         };
         let details = vec![
             vec![
-                format!("当前值: {}", self.config.project.merge_branch_middle),
-                "会影响默认生成的 merge 分支名和默认 branch_map。".to_string(),
+                format!("当前值: {}", self.config.project.root_dir),
+                "gmux 会从这里扫描本地 Git 仓库。".to_string(),
             ],
             vec![
                 format!(
@@ -890,8 +1127,23 @@ impl App {
                 lines
             },
             vec![
-                "按当前 env_branches + merge_branch_middle 重建默认映射。".to_string(),
-                "如果你有手工定制过 branch_map，这一步会覆盖掉它。".to_string(),
+                format!("当前值: {}", self.config.project.merge_branch_middle),
+                "会影响默认生成的 merge 分支名和默认 branch_map。".to_string(),
+            ],
+            vec![
+                format!("当前值: {}", self.config.gitlab.host),
+                "用于加载 GitLab 项目和创建/审批/合并 MR。".to_string(),
+            ],
+            vec![
+                format!(
+                    "当前 Token: {}",
+                    Self::mask_token(&self.config.gitlab.token)
+                ),
+                "修改后后续 GitLab API 请求会立即使用新的 Token。".to_string(),
+            ],
+            vec![
+                "先预览即将生成的默认映射，再决定是否覆盖当前 branch_map。".to_string(),
+                "适合在你调整了环境分支或 merge_branch_middle 之后使用。".to_string(),
             ],
             vec![
                 format!("配置路径: {}", Config::config_path().display()),
@@ -901,14 +1153,14 @@ impl App {
 
         let mut menu = MenuState::new(
             "gmux / 配置管理",
-            "动态修改分支相关配置，改完记得保存",
+            "动态修改分支相关配置，改动会自动保存",
             items,
         )
         .with_details(details)
         .with_help(vec![
-            "这里可以直接修改分支相关配置，不需要退出 gmux 手工改 TOML。".to_string(),
+            "这里更像一个工作流设置台：改完会自动保存并立刻生效。".to_string(),
             "环境分支列表决定本地同步和本地合并的目标分支集合。".to_string(),
-            "branch_map 决定 GitLab MR 的源/目标映射关系。".to_string(),
+            "MR 映射决定 GitLab 批量创建 MR 时会使用哪些 source -> target 关系。".to_string(),
             "这里的修改会自动写回 ~/.config/gmux/gmux.toml，不需要额外手动保存。".to_string(),
         ]);
 
@@ -916,11 +1168,14 @@ impl App {
             terminal.draw(|f| menu.render(f))?;
             if let Some(action) = menu.handle_key_event() {
                 return Ok(match action {
-                    MenuAction::Select(0) => Some(ConfigMenuAction::EditMergeMiddle),
+                    MenuAction::Select(0) => Some(ConfigMenuAction::EditProjectRoot),
                     MenuAction::Select(1) => Some(ConfigMenuAction::EditEnvBranches),
                     MenuAction::Select(2) => Some(ConfigMenuAction::EditBranchMap),
-                    MenuAction::Select(3) => Some(ConfigMenuAction::ResetBranchMap),
-                    MenuAction::Select(4) => Some(ConfigMenuAction::Back),
+                    MenuAction::Select(3) => Some(ConfigMenuAction::EditMergeMiddle),
+                    MenuAction::Select(4) => Some(ConfigMenuAction::EditGitLabHost),
+                    MenuAction::Select(5) => Some(ConfigMenuAction::EditGitLabToken),
+                    MenuAction::Select(6) => Some(ConfigMenuAction::ResetBranchMap),
+                    MenuAction::Select(7) => Some(ConfigMenuAction::Back),
                     MenuAction::Back => Some(ConfigMenuAction::Back),
                     MenuAction::Quit => Some(ConfigMenuAction::Quit),
                     _ => None,
@@ -1017,7 +1272,7 @@ impl App {
         .with_help(vec![
             "重命名：只修改这个环境分支自己的名称。".to_string(),
             "上移/下移：调整分支顺序，影响列表展示和默认映射生成顺序。".to_string(),
-            "删除后如果 branch_map 还引用它，记得去同步修改映射。".to_string(),
+            "删除时如果有映射仍然指向这个环境分支，gmux 会继续问你要不要一起清理。".to_string(),
         ]);
 
         loop {
@@ -1134,6 +1389,231 @@ impl App {
                     MenuAction::Select(2) => Some(ConfigBranchMapAction::Back),
                     MenuAction::Back => Some(ConfigBranchMapAction::Back),
                     MenuAction::Quit => Some(ConfigBranchMapAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_env_branch_delete_confirm(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        branch: &str,
+        linked_mappings: &[String],
+    ) -> Result<Option<ConfigEnvBranchDeleteConfirmAction>> {
+        let items = if linked_mappings.is_empty() {
+            vec!["确认删除环境分支".to_string(), "取消".to_string()]
+        } else {
+            vec![
+                format!("删除环境分支，并删除 {} 组关联映射", linked_mappings.len()),
+                "只删除环境分支，保留现有映射".to_string(),
+                "取消".to_string(),
+            ]
+        };
+
+        let details = if linked_mappings.is_empty() {
+            vec![
+                vec![format!("将删除环境分支: {branch}")],
+                vec!["不执行删除。".to_string()],
+            ]
+        } else {
+            vec![
+                {
+                    let mut lines = vec![format!("将删除环境分支: {branch}")];
+                    lines.extend(
+                        linked_mappings
+                            .iter()
+                            .map(|source| format!("关联映射: {source} -> {branch}")),
+                    );
+                    lines
+                },
+                vec![
+                    format!("将删除环境分支: {branch}"),
+                    "当前 branch_map 仍然会保留这些映射。".to_string(),
+                ],
+                vec!["不执行删除。".to_string()],
+            ]
+        };
+
+        let mut menu = MenuState::new(
+            "gmux / 删除环境分支",
+            &format!("你正在删除环境分支: {branch}"),
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "如果一个环境分支仍然被 branch_map 当作目标分支引用，最好一起清理对应映射。"
+                .to_string(),
+            "保留映射也不是不可以，但后续批量 MR 可能会继续用到已经不在环境列表里的目标分支。"
+                .to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match (linked_mappings.is_empty(), action) {
+                    (true, MenuAction::Select(0)) => {
+                        Some(ConfigEnvBranchDeleteConfirmAction::DeleteOnly)
+                    }
+                    (true, MenuAction::Select(1)) => Some(ConfigEnvBranchDeleteConfirmAction::Back),
+                    (false, MenuAction::Select(0)) => {
+                        Some(ConfigEnvBranchDeleteConfirmAction::DeleteWithMappings)
+                    }
+                    (false, MenuAction::Select(1)) => {
+                        Some(ConfigEnvBranchDeleteConfirmAction::DeleteOnly)
+                    }
+                    (false, MenuAction::Select(2)) => {
+                        Some(ConfigEnvBranchDeleteConfirmAction::Back)
+                    }
+                    (_, MenuAction::Back) => Some(ConfigEnvBranchDeleteConfirmAction::Back),
+                    (_, MenuAction::Quit) => Some(ConfigEnvBranchDeleteConfirmAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_branch_map_target_select(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        draft: &BranchMapDraft,
+    ) -> Result<Option<ConfigBranchMapTargetSelectAction>> {
+        let existing_target = draft
+            .original_source
+            .as_deref()
+            .and_then(|source| self.config.branch_map.get(source))
+            .cloned();
+        let mut items = Vec::new();
+        let mut details = Vec::new();
+
+        if let Some(target) = existing_target.as_ref() {
+            if !self
+                .config
+                .project
+                .env_branches
+                .iter()
+                .any(|env| env == target)
+            {
+                items.push(format!("保留当前自定义目标分支: {target}"));
+                details.push(vec![
+                    format!("源分支: {}", draft.source_branch),
+                    format!("目标分支: {target}"),
+                ]);
+            }
+        }
+
+        for env in &self.config.project.env_branches {
+            items.push(format!("使用环境分支: {env}"));
+            details.push(vec![
+                format!("源分支: {}", draft.source_branch),
+                format!("目标分支: {env}"),
+            ]);
+        }
+
+        items.push("手动输入其他目标分支".to_string());
+        details.push(vec![
+            format!("源分支: {}", draft.source_branch),
+            "适合目标分支不在环境分支列表中的场景。".to_string(),
+        ]);
+        items.push("返回上一步".to_string());
+        details.push(vec!["返回源分支编辑页。".to_string()]);
+
+        let custom_offset = if existing_target.as_ref().is_some_and(|target| {
+            !self
+                .config
+                .project
+                .env_branches
+                .iter()
+                .any(|env| env == target)
+        }) {
+            1
+        } else {
+            0
+        };
+
+        let mut menu = MenuState::new(
+            "gmux / 选择目标分支",
+            &format!("为 `{}` 选择目标分支", draft.source_branch),
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "优先直接从环境分支列表里选目标分支，这样最不容易拼错。".to_string(),
+            "只有目标分支不在环境分支列表里时，再使用“手动输入其他目标分支”。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                let env_start = custom_offset;
+                let env_end = env_start + self.config.project.env_branches.len();
+                let custom_index = env_end;
+                let back_index = custom_index + 1;
+                return Ok(match action {
+                    MenuAction::Select(0) if custom_offset == 1 => {
+                        Some(ConfigBranchMapTargetSelectAction::Select(
+                            existing_target.clone().unwrap_or_default(),
+                        ))
+                    }
+                    MenuAction::Select(i) if i >= env_start && i < env_end => {
+                        Some(ConfigBranchMapTargetSelectAction::Select(
+                            self.config.project.env_branches[i - env_start].clone(),
+                        ))
+                    }
+                    MenuAction::Select(i) if i == custom_index => {
+                        Some(ConfigBranchMapTargetSelectAction::CustomInput)
+                    }
+                    MenuAction::Select(i) if i == back_index => {
+                        Some(ConfigBranchMapTargetSelectAction::Back)
+                    }
+                    MenuAction::Back => Some(ConfigBranchMapTargetSelectAction::Back),
+                    MenuAction::Quit => Some(ConfigBranchMapTargetSelectAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_branch_map_reset_preview(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        mappings: &[(String, String)],
+    ) -> Result<Option<ConfigBranchMapResetAction>> {
+        let items = vec!["确认覆盖当前映射".to_string(), "取消".to_string()];
+        let mut preview_lines = vec![
+            format!("当前映射数: {}", self.config.branch_map.len()),
+            format!("新默认映射数: {}", mappings.len()),
+        ];
+        preview_lines.extend(
+            mappings
+                .iter()
+                .take(8)
+                .map(|(src, tgt)| format!("{src} -> {tgt}")),
+        );
+        let details = vec![
+            preview_lines,
+            vec!["取消本次重建，保持当前 branch_map 不变。".to_string()],
+        ];
+
+        let mut menu = MenuState::new(
+            "gmux / 预览默认 MR 映射",
+            "确认是否用新的默认映射覆盖当前 branch_map",
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "这一步会用当前环境分支列表和 merge_branch_middle 重新生成默认 MR 映射。".to_string(),
+            "如果你已经手工定制过 branch_map，确认前先看清楚会生成哪些新映射。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ConfigBranchMapResetAction::Confirm),
+                    MenuAction::Select(1) => Some(ConfigBranchMapResetAction::Back),
+                    MenuAction::Back => Some(ConfigBranchMapResetAction::Back),
+                    MenuAction::Quit => Some(ConfigBranchMapResetAction::Quit),
                     _ => None,
                 });
             }
@@ -2074,6 +2554,78 @@ impl App {
         ])
     }
 
+    fn linked_branch_map_sources(&self, env_branch: &str) -> Vec<String> {
+        let mut sources: Vec<String> = self
+            .config
+            .branch_map
+            .iter()
+            .filter_map(|(src, tgt)| (tgt == env_branch).then_some(src.clone()))
+            .collect();
+        sources.sort();
+        sources
+    }
+
+    fn default_branch_map_entries(&self) -> Vec<(String, String)> {
+        let mut mappings: Vec<(String, String)> = self
+            .config
+            .project
+            .env_branches
+            .iter()
+            .map(|env| {
+                (
+                    format!("{}_{}_meger", env, self.config.project.merge_branch_middle),
+                    env.clone(),
+                )
+            })
+            .collect();
+        mappings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        mappings
+    }
+
+    fn mask_token(token: &str) -> String {
+        if token.is_empty() {
+            return "(未设置)".to_string();
+        }
+        let prefix_len = token.len().min(6);
+        format!("{}****", &token[..prefix_len])
+    }
+
+    fn config_project_root_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改项目根目录",
+            "项目根目录",
+            "例如 /Users/you/workspaces",
+        );
+        state.value = self.config.project.root_dir.clone();
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_gitlab_host_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改 GitLab 地址",
+            "GitLab Host",
+            "例如 gitlab.example.com:8099",
+        );
+        state.value = self.config.gitlab.host.clone();
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_gitlab_token_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改 GitLab Token",
+            "GitLab Token",
+            "例如 glpat-xxxxxxxxxxxx",
+        );
+        state.value = self.config.gitlab.token.clone();
+        state.cursor_pos = state.value.len();
+        state
+    }
+
     fn config_merge_middle_input(&self) -> InputState {
         let mut state = InputState::new(
             "gmux / 配置管理",
@@ -2127,7 +2679,7 @@ impl App {
     ) -> InputState {
         let mut state = InputState::new(
             "gmux / 配置管理",
-            &format!("编辑 branch_map / 第二步  [源分支: {source_branch}]"),
+            &format!("编辑 branch_map / 自定义目标  [源分支: {source_branch}]"),
             "目标分支",
             "例如 master / stage / prod",
         );
@@ -2285,6 +2837,9 @@ enum MainMenuAction {
 }
 
 enum ConfigMenuAction {
+    EditProjectRoot,
+    EditGitLabHost,
+    EditGitLabToken,
     EditMergeMiddle,
     EditEnvBranches,
     EditBranchMap,
@@ -2309,6 +2864,13 @@ enum ConfigEnvBranchAction {
     Quit,
 }
 
+enum ConfigEnvBranchDeleteConfirmAction {
+    DeleteOnly,
+    DeleteWithMappings,
+    Back,
+    Quit,
+}
+
 enum ConfigBranchMapMenuAction {
     Add,
     Select(String),
@@ -2319,6 +2881,19 @@ enum ConfigBranchMapMenuAction {
 enum ConfigBranchMapAction {
     Edit,
     Delete,
+    Back,
+    Quit,
+}
+
+enum ConfigBranchMapTargetSelectAction {
+    Select(String),
+    CustomInput,
+    Back,
+    Quit,
+}
+
+enum ConfigBranchMapResetAction {
+    Confirm,
     Back,
     Quit,
 }
