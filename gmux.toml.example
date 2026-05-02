@@ -13,8 +13,8 @@ host = ""
 token = ""
 
 [project]
-# 本地项目根目录，脚本会扫描该目录下所有 Git 仓库（必填）
-root_dir = ""
+# 本地项目根目录列表，脚本会扫描这些目录下的一级 Git 仓库（必填）
+root_dirs = ["/Users/you/code", "/Users/you/client-work"]
 # 合并分支中间名（必填）
 # 例如设为 "henry"，则合并分支名为 uat_henry_meger
 # 设为 "PROJECT_NAME" 则使用项目名称作为中间名

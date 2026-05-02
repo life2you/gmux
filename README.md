@@ -12,7 +12,7 @@
 - Creates GitLab merge requests from the terminal
 - Shows preflight checks and action previews before executing risky operations
 - Supports searchable selection menus and in-app help with `?`
-- Lets you manage branch settings, GitLab connection info, and project root directly inside the TUI
+- Lets you manage branch settings, GitLab connection info, and multiple project roots directly inside the TUI
 - Uses a single global config file at `~/.config/gmux/gmux.toml`
 
 ## Project Layout
@@ -62,7 +62,7 @@ host = "gitlab.example.com:8099"
 token = "glpat-xxxx"
 
 [project]
-root_dir = "/Users/you/code"
+root_dirs = ["/Users/you/code", "/Users/you/client-work"]
 merge_branch_middle = "henry"
 env_branches = ["dev", "test", "uat", "stage", "prod"]
 
@@ -80,7 +80,8 @@ env_branches = ["dev", "test", "uat", "stage", "prod"]
 - GitLab MR workflows also show a preview before sending API requests.
 - Search is available in the main selection flows. Press `/` to filter large project or branch lists.
 - Press `?` on supported screens to see contextual usage help inside the app.
-- `Config Management` lets you edit `project.root_dir`, `gitlab.host`, `gitlab.token`, `merge_branch_middle`, `env_branches`, and `branch_map` with immediate auto-save.
+- `Config Management` lets you edit `project.root_dirs`, `gitlab.host`, `gitlab.token`, `merge_branch_middle`, `env_branches`, and `branch_map` with immediate auto-save.
+- If multiple roots contain repositories with the same name, the project picker shows the source root to help you choose the right repo.
 
 ## Homebrew
 

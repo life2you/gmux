@@ -2,11 +2,11 @@
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 
 pub struct InputState {
@@ -17,10 +17,12 @@ pub struct InputState {
     pub value: String,
     pub error: Option<String>,
     pub cursor_pos: usize,
+    pub file_picker_enabled: bool,
 }
 
 pub enum InputAction {
     Submit(String),
+    PickFolder,
     Back,
     Quit,
 }
@@ -35,7 +37,13 @@ impl InputState {
             value: String::new(),
             error: None,
             cursor_pos: 0,
+            file_picker_enabled: false,
         }
+    }
+
+    pub fn with_file_picker(mut self) -> Self {
+        self.file_picker_enabled = true;
+        self
     }
 
     pub fn handle_key_event(&mut self) -> Option<InputAction> {
@@ -52,6 +60,9 @@ impl InputState {
                     }
                 }
                 KeyCode::Esc => return Some(InputAction::Back),
+                KeyCode::Char('f') if self.file_picker_enabled => {
+                    return Some(InputAction::PickFolder);
+                }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Some(InputAction::Quit);
                 }
@@ -91,10 +102,10 @@ impl InputState {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // header
-                Constraint::Length(2),  // label + placeholder
-                Constraint::Length(2),  // error
-                Constraint::Length(3),  // input
+                Constraint::Length(3), // header
+                Constraint::Length(2), // label + placeholder
+                Constraint::Length(2), // error
+                Constraint::Length(3), // input
                 Constraint::Min(1),    // spacer
                 Constraint::Length(1), // footer
             ])
@@ -161,7 +172,12 @@ impl InputState {
         };
 
         let input = Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             display,
         ]))
         .block(Block::default());
@@ -169,19 +185,30 @@ impl InputState {
         frame.render_widget(input, area);
 
         // Set cursor position
-        frame.set_cursor_position((
-            area.x + 2 + self.cursor_pos as u16,
-            area.y,
-        ));
+        frame.set_cursor_position((area.x + 2 + self.cursor_pos as u16, area.y));
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let footer = Paragraph::new(Line::from(vec![
+        let picker_hint = if self.file_picker_enabled {
+            vec![
+                Span::styled("  f", Style::default().fg(Color::DarkGray)),
+                Span::styled(" 选择文件夹  ", Style::default().fg(Color::DarkGray)),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        let mut spans = vec![
             Span::styled("  Enter", Style::default().fg(Color::DarkGray)),
             Span::styled(" 确认  ", Style::default().fg(Color::DarkGray)),
+        ];
+        spans.extend(picker_hint);
+        spans.extend([
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
             Span::styled(" 返回", Style::default().fg(Color::DarkGray)),
-        ]));
+        ]);
+
+        let footer = Paragraph::new(Line::from(spans));
         frame.render_widget(footer, area);
     }
 }

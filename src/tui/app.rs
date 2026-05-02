@@ -1,10 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
+use std::path::Path;
+use std::process::Command;
 
 use crate::config::Config;
 use crate::git;
@@ -29,6 +31,10 @@ struct BranchMapDraft {
 enum Page {
     MainMenu,
     ConfigMenu,
+    ConfigProjectRootsMenu,
+    ConfigProjectRootActions {
+        index: usize,
+    },
     ConfigGitLabHostInput {
         state: InputState,
     },
@@ -36,6 +42,7 @@ enum Page {
         state: InputState,
     },
     ConfigProjectRootInput {
+        index: Option<usize>,
         state: InputState,
     },
     ConfigMergeMiddleInput {
@@ -206,10 +213,8 @@ impl App {
                 Page::ConfigMenu => {
                     let action = self.show_config_menu(terminal)?;
                     match action {
-                        Some(ConfigMenuAction::EditProjectRoot) => {
-                            page_stack.push(Page::ConfigProjectRootInput {
-                                state: self.config_project_root_input(),
-                            });
+                        Some(ConfigMenuAction::EditProjectRoots) => {
+                            page_stack.push(Page::ConfigProjectRootsMenu);
                         }
                         Some(ConfigMenuAction::EditGitLabHost) => {
                             page_stack.push(Page::ConfigGitLabHostInput {
@@ -244,25 +249,95 @@ impl App {
                         None => {}
                     }
                 }
-                Page::ConfigProjectRootInput { state } => {
-                    terminal.draw(|f| state.render(f))?;
-                    match state.handle_key_event() {
-                        Some(InputAction::Submit(value)) => {
-                            let value = value.trim();
-                            if value.is_empty() {
-                                state.error = Some("项目根目录不能为空".to_string());
+                Page::ConfigProjectRootsMenu => {
+                    let action = self.show_config_project_roots_menu(terminal)?;
+                    match action {
+                        Some(ConfigProjectRootsAction::Add) => {
+                            page_stack.push(Page::ConfigProjectRootInput {
+                                index: None,
+                                state: self.config_project_root_input(None),
+                            });
+                        }
+                        Some(ConfigProjectRootsAction::Select(index)) => {
+                            page_stack.push(Page::ConfigProjectRootActions { index });
+                        }
+                        Some(ConfigProjectRootsAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigProjectRootsAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigProjectRootActions { index } => {
+                    let current_index = *index;
+                    let action = self.show_config_project_root_actions(terminal, current_index)?;
+                    match action {
+                        Some(ConfigProjectRootAction::Edit) => {
+                            page_stack.push(Page::ConfigProjectRootInput {
+                                index: Some(current_index),
+                                state: self.config_project_root_input(Some(current_index)),
+                            });
+                        }
+                        Some(ConfigProjectRootAction::Delete) => {
+                            if self.config.project.root_dirs.len() <= 1 {
+                                page_stack.push(Page::ExecuteResult {
+                                    lines: vec![(false, "至少需要保留一个项目根目录".to_string())],
+                                });
                             } else {
-                                let new_value = value.to_string();
                                 match self.persist_config_change(|config| {
-                                    config.project.root_dir = new_value;
+                                    config.project.root_dirs.remove(current_index);
                                 }) {
                                     Ok(()) => {
                                         page_stack.pop();
                                     }
                                     Err(err) => {
-                                        state.error = Some(format!("保存失败: {err:#}"));
+                                        page_stack.push(Page::ExecuteResult {
+                                            lines: vec![(false, format!("删除项目根目录失败: {err:#}"))],
+                                        });
                                     }
                                 }
+                            }
+                        }
+                        Some(ConfigProjectRootAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigProjectRootAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigProjectRootInput { index, state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            match Self::normalize_project_root_input(&value) {
+                                Ok(new_value) => {
+                                    let edit_index = *index;
+                                    match self.persist_config_change(|config| {
+                                        match edit_index {
+                                            Some(index) => config.project.root_dirs[index] = new_value,
+                                            None => config.project.root_dirs.push(new_value),
+                                        }
+                                        Self::dedupe_root_dirs(&mut config.project.root_dirs);
+                                    }) {
+                                        Ok(()) => {
+                                            page_stack.pop();
+                                        }
+                                        Err(err) => {
+                                            state.error = Some(format!("保存失败: {err:#}"));
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    state.error = Some(err.to_string());
+                                }
+                            }
+                        }
+                        Some(InputAction::PickFolder) => {
+                            if let Some(path) = Self::choose_folder_with_dialog("请选择项目根目录")
+                            {
+                                state.value = path;
+                                state.cursor_pos = state.value.len();
+                                state.error = None;
                             }
                         }
                         Some(InputAction::Back) => {
@@ -297,6 +372,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -329,6 +405,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -357,6 +434,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -543,6 +621,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -620,6 +699,7 @@ impl App {
                                 page_stack.push(Page::ConfigBranchMapTargetSelect { draft });
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -697,6 +777,7 @@ impl App {
                                 }
                             }
                         }
+                        Some(InputAction::PickFolder) => {}
                         Some(InputAction::Back) => {
                             page_stack.pop();
                         }
@@ -1090,7 +1171,7 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<ConfigMenuAction>> {
         let items = vec![
-            "修改项目根目录".to_string(),
+            "管理项目根目录".to_string(),
             "管理环境分支".to_string(),
             "管理 MR 映射".to_string(),
             "修改合并分支中间名".to_string(),
@@ -1111,8 +1192,9 @@ impl App {
         };
         let details = vec![
             vec![
-                format!("当前值: {}", self.config.project.root_dir),
-                "gmux 会从这里扫描本地 Git 仓库。".to_string(),
+                format!("当前共 {} 个项目根目录", self.config.project.root_dirs.len()),
+                format!("当前值: {}", self.config.project.root_dirs.join(" | ")),
+                "gmux 会汇总扫描这些目录下的本地 Git 仓库。".to_string(),
             ],
             vec![
                 format!(
@@ -1159,6 +1241,7 @@ impl App {
         .with_details(details)
         .with_help(vec![
             "这里更像一个工作流设置台：改完会自动保存并立刻生效。".to_string(),
+            "项目根目录支持多目录配置，适合把不同业务线或不同工作区一起纳入扫描。".to_string(),
             "环境分支列表决定本地同步和本地合并的目标分支集合。".to_string(),
             "MR 映射决定 GitLab 批量创建 MR 时会使用哪些 source -> target 关系。".to_string(),
             "这里的修改会自动写回 ~/.config/gmux/gmux.toml，不需要额外手动保存。".to_string(),
@@ -1168,7 +1251,7 @@ impl App {
             terminal.draw(|f| menu.render(f))?;
             if let Some(action) = menu.handle_key_event() {
                 return Ok(match action {
-                    MenuAction::Select(0) => Some(ConfigMenuAction::EditProjectRoot),
+                    MenuAction::Select(0) => Some(ConfigMenuAction::EditProjectRoots),
                     MenuAction::Select(1) => Some(ConfigMenuAction::EditEnvBranches),
                     MenuAction::Select(2) => Some(ConfigMenuAction::EditBranchMap),
                     MenuAction::Select(3) => Some(ConfigMenuAction::EditMergeMiddle),
@@ -1231,6 +1314,117 @@ impl App {
                     MenuAction::Back => Some(ConfigEnvBranchesAction::Back),
                     MenuAction::Quit => Some(ConfigEnvBranchesAction::Quit),
                     _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_project_roots_menu(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<Option<ConfigProjectRootsAction>> {
+        let mut items = vec!["新增项目根目录".to_string()];
+        items.extend(
+            self.config
+                .project
+                .root_dirs
+                .iter()
+                .enumerate()
+                .map(|(index, root)| format!("目录 {}: {}", index + 1, Self::root_label(root))),
+        );
+        items.push("返回配置管理".to_string());
+
+        let mut details = vec![vec!["添加新的项目扫描目录。".to_string()]];
+        details.extend(self.config.project.root_dirs.iter().map(|root| {
+            vec![
+                format!("完整路径: {root}"),
+                "进入后可以编辑或删除这个项目根目录。".to_string(),
+            ]
+        }));
+        details.push(vec!["返回上一层配置管理。".to_string()]);
+
+        let mut menu = MenuState::new(
+            "gmux / 项目根目录",
+            "管理一个或多个项目扫描目录",
+            items,
+        )
+        .with_details(details)
+        .with_search("过滤项目根目录")
+        .with_help(vec![
+            "这里管理 gmux 会扫描哪些本地工作目录。".to_string(),
+            "支持同时配置多个项目根目录，适合不同业务线或不同代码区。".to_string(),
+            "如果多个目录里有同名仓库，项目选择页会显示来源目录帮助你区分。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                let root_count = self.config.project.root_dirs.len();
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ConfigProjectRootsAction::Add),
+                    MenuAction::Select(i) if i == root_count + 1 => {
+                        Some(ConfigProjectRootsAction::Back)
+                    }
+                    MenuAction::Select(i) if i > 0 && i <= root_count => {
+                        Some(ConfigProjectRootsAction::Select(i - 1))
+                    }
+                    MenuAction::Back => Some(ConfigProjectRootsAction::Back),
+                    MenuAction::Quit => Some(ConfigProjectRootsAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_project_root_actions(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        index: usize,
+    ) -> Result<Option<ConfigProjectRootAction>> {
+        let root = self
+            .config
+            .project
+            .root_dirs
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let mut items = vec!["编辑路径".to_string()];
+        let mut details = vec![vec![
+            format!("当前路径: {root}"),
+            "重新指定这个项目根目录。".to_string(),
+        ]];
+        if self.config.project.root_dirs.len() > 1 {
+            items.push("删除目录".to_string());
+            details.push(vec![
+                format!("当前路径: {root}"),
+                "从扫描列表中移除这个项目根目录。".to_string(),
+            ]);
+        }
+        items.push("返回项目根目录列表".to_string());
+        details.push(vec!["返回项目根目录列表。".to_string()]);
+
+        let mut menu = MenuState::new(
+            "gmux / 项目根目录操作",
+            "选择对当前项目根目录执行的操作",
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "每个项目根目录都可以单独编辑或删除。".to_string(),
+            "至少需要保留一个项目根目录。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ConfigProjectRootAction::Edit),
+                    MenuAction::Select(1) if self.config.project.root_dirs.len() > 1 => {
+                        Some(ConfigProjectRootAction::Delete)
+                    }
+                    MenuAction::Select(_) => Some(ConfigProjectRootAction::Back),
+                    MenuAction::Back => Some(ConfigProjectRootAction::Back),
+                    MenuAction::Quit => Some(ConfigProjectRootAction::Quit),
                 });
             }
         }
@@ -1624,7 +1818,7 @@ impl App {
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<ProjectAction>> {
-        let items: Vec<String> = self.projects.iter().map(|p| p.name.clone()).collect();
+        let items: Vec<String> = self.projects.iter().map(|p| p.display_name.clone()).collect();
         let details: Vec<Vec<String>> = self
             .projects
             .iter()
@@ -1632,6 +1826,7 @@ impl App {
                 let mut d = vec![
                     format!("名称: {}", p.name),
                     format!("路径: {}", p.path.display()),
+                    format!("来源目录: {}", p.source_root.display()),
                 ];
                 for env in &self.config.project.env_branches {
                     let merge = self.config.get_merge_branch_name(env, &p.name);
@@ -1649,7 +1844,8 @@ impl App {
         .with_details(details)
         .with_search("输入项目名或路径关键词")
         .with_help(vec![
-            "这里显示项目根目录下扫描到的本地 Git 仓库。".to_string(),
+            "这里显示所有项目根目录下扫描到的本地 Git 仓库。".to_string(),
+            "如果多个工作目录里有同名仓库，项目名后会带上来源目录。".to_string(),
             "按 / 搜索项目名或路径关键词，便于仓库较多时快速定位。".to_string(),
             "进入项目后可以继续做本地同步、批量 merge 或单目标 merge。".to_string(),
         ]);
@@ -2179,7 +2375,7 @@ impl App {
     // ---- Business logic ----
 
     fn scan_projects(&mut self) -> Result<()> {
-        self.projects = project::scan_projects(&self.config.project.root_dir)?;
+        self.projects = project::scan_projects(&self.config.project.root_dirs)?;
         Ok(())
     }
 
@@ -2590,14 +2786,85 @@ impl App {
         format!("{}****", &token[..prefix_len])
     }
 
-    fn config_project_root_input(&self) -> InputState {
+    fn normalize_project_root_input(value: &str) -> Result<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            bail!("项目根目录不能为空");
+        }
+        let path = Path::new(trimmed);
+        if !path.is_dir() {
+            bail!("项目根目录不存在: {}", path.display());
+        }
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("规范化项目根目录失败: {}", path.display()))?;
+        Ok(canonical.display().to_string())
+    }
+
+    fn choose_folder_with_dialog(prompt: &str) -> Option<String> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg("try")
+            .arg("-e")
+            .arg(format!(
+                "POSIX path of (choose folder with prompt \"{}\")",
+                prompt.replace('"', "\\\"")
+            ))
+            .arg("-e")
+            .arg("on error number -128")
+            .arg("-e")
+            .arg("return \"\"")
+            .arg("-e")
+            .arg("end try")
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    fn dedupe_root_dirs(root_dirs: &mut Vec<String>) {
+        let mut seen = std::collections::HashSet::new();
+        root_dirs.retain(|root| seen.insert(root.clone()));
+    }
+
+    fn root_label(root: &str) -> String {
+        Path::new(root)
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| root.to_string())
+    }
+
+    fn config_project_root_input(&self, index: Option<usize>) -> InputState {
         let mut state = InputState::new(
             "gmux / 配置管理",
-            "修改项目根目录",
+            "新增或编辑一个项目根目录",
             "项目根目录",
             "例如 /Users/you/workspaces",
-        );
-        state.value = self.config.project.root_dir.clone();
+        )
+        .with_file_picker();
+        if let Some(index) = index {
+            state.value = self
+                .config
+                .project
+                .root_dirs
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+        }
         state.cursor_pos = state.value.len();
         state
     }
@@ -2837,13 +3104,27 @@ enum MainMenuAction {
 }
 
 enum ConfigMenuAction {
-    EditProjectRoot,
+    EditProjectRoots,
     EditGitLabHost,
     EditGitLabToken,
     EditMergeMiddle,
     EditEnvBranches,
     EditBranchMap,
     ResetBranchMap,
+    Back,
+    Quit,
+}
+
+enum ConfigProjectRootsAction {
+    Add,
+    Select(usize),
+    Back,
+    Quit,
+}
+
+enum ConfigProjectRootAction {
+    Edit,
+    Delete,
     Back,
     Quit,
 }
