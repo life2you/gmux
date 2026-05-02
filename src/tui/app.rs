@@ -53,9 +53,6 @@ enum Page {
         project_id: u64,
         project_name: String,
     },
-    MrResult {
-        lines: Vec<(bool, String)>,
-    },
 }
 
 #[derive(Clone)]
@@ -83,6 +80,22 @@ enum ExecutionPlan {
         project_idx: usize,
         source_branch: String,
         targets: Vec<String>,
+    },
+    MrSingle {
+        project_id: u64,
+        project_name: String,
+        source_branch: String,
+        target_branch: String,
+    },
+    MrBatch {
+        project_id: u64,
+        project_name: String,
+        mappings: Vec<(String, String)>,
+    },
+    MrFixedThree {
+        project_id: u64,
+        project_name: String,
+        mappings: Vec<(String, String)>,
     },
 }
 
@@ -286,7 +299,7 @@ impl App {
                         None => {}
                     }
                 }
-                Page::ExecuteResult { lines } | Page::MrResult { lines } => {
+                Page::ExecuteResult { lines } => {
                     let lines = lines.clone();
                     let action = self.show_results(terminal, &lines)?;
                     match action {
@@ -347,12 +360,22 @@ impl App {
                                 });
                             }
                             MrMode::Batch => {
-                                let results = self.execute_mr_batch(id, &name);
-                                page_stack.push(Page::MrResult { lines: results });
+                                page_stack.push(Page::ExecutionPreview {
+                                    plan: ExecutionPlan::MrBatch {
+                                        project_id: id,
+                                        project_name: name.clone(),
+                                        mappings: self.branch_map_without_master(),
+                                    },
+                                });
                             }
                             MrMode::FixedThree => {
-                                let results = self.execute_mr_fixed_three(id, &name);
-                                page_stack.push(Page::MrResult { lines: results });
+                                page_stack.push(Page::ExecutionPreview {
+                                    plan: ExecutionPlan::MrFixedThree {
+                                        project_id: id,
+                                        project_name: name.clone(),
+                                        mappings: self.fixed_three_mappings(),
+                                    },
+                                });
                             }
                         },
                         Some(GitLabAction::Back) => {
@@ -371,8 +394,14 @@ impl App {
                     let action = self.show_branch_map_select(terminal)?;
                     match action {
                         Some(BranchMapAction::Select(src, tgt)) => {
-                            let results = self.execute_mr_single(pid, &pname, &src, &tgt);
-                            page_stack.push(Page::MrResult { lines: results });
+                            page_stack.push(Page::ExecutionPreview {
+                                plan: ExecutionPlan::MrSingle {
+                                    project_id: pid,
+                                    project_name: pname.clone(),
+                                    source_branch: src,
+                                    target_branch: tgt,
+                                },
+                            });
                         }
                         Some(BranchMapAction::Back) => {
                             page_stack.pop();
@@ -1015,6 +1044,81 @@ impl App {
                     lines,
                 )
             }
+            ExecutionPlan::MrSingle {
+                project_id,
+                project_name,
+                source_branch,
+                target_branch,
+            } => {
+                let lines = vec![
+                    format!("GitLab 项目: {project_name}"),
+                    format!("项目 ID: {project_id}"),
+                    format!("源分支: {source_branch}"),
+                    format!("目标分支: {target_branch}"),
+                    String::new(),
+                    "即将执行以下步骤:".to_string(),
+                    format!("- 调用 GitLab API 创建 MR: `{source_branch}` -> `{target_branch}`"),
+                    "- 如果创建成功，将继续自动审批并尝试自动合并".to_string(),
+                    String::new(),
+                    "当前只是预览，按 Enter 后才会真正执行。".to_string(),
+                ];
+
+                (
+                    "gmux / 执行预览".to_string(),
+                    "确认单个 GitLab MR 的创建与后续动作".to_string(),
+                    lines,
+                )
+            }
+            ExecutionPlan::MrBatch {
+                project_id,
+                project_name,
+                mappings,
+            } => {
+                let mut lines = vec![
+                    format!("GitLab 项目: {project_name}"),
+                    format!("项目 ID: {project_id}"),
+                    format!("计划创建 MR 数量: {}", mappings.len()),
+                    String::new(),
+                    "即将执行以下步骤:".to_string(),
+                ];
+                for (src, tgt) in mappings {
+                    lines.push(format!("- 创建 MR: `{src}` -> `{tgt}`"));
+                }
+                lines.push("- 对创建成功的 MR 继续自动审批并尝试自动合并".to_string());
+                lines.push(String::new());
+                lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
+
+                (
+                    "gmux / 执行预览".to_string(),
+                    "确认批量 GitLab MR 的创建与后续动作".to_string(),
+                    lines,
+                )
+            }
+            ExecutionPlan::MrFixedThree {
+                project_id,
+                project_name,
+                mappings,
+            } => {
+                let mut lines = vec![
+                    format!("GitLab 项目: {project_name}"),
+                    format!("项目 ID: {project_id}"),
+                    format!("固定映射 MR 数量: {}", mappings.len()),
+                    String::new(),
+                    "即将执行以下步骤:".to_string(),
+                ];
+                for (src, tgt) in mappings {
+                    lines.push(format!("- 创建 MR: `{src}` -> `{tgt}`"));
+                }
+                lines.push("- 对创建成功的 MR 继续自动审批并尝试自动合并".to_string());
+                lines.push(String::new());
+                lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
+
+                (
+                    "gmux / 执行预览".to_string(),
+                    "确认固定映射 GitLab MR 的创建与后续动作".to_string(),
+                    lines,
+                )
+            }
         }
     }
 
@@ -1124,6 +1228,28 @@ impl App {
         }
     }
 
+    fn branch_map_without_master(&self) -> Vec<(String, String)> {
+        let mut mappings: Vec<(String, String)> = self
+            .config
+            .branch_map
+            .iter()
+            .filter(|(_, tgt)| tgt.as_str() != "master")
+            .map(|(src, tgt)| (src.clone(), tgt.clone()))
+            .collect();
+        mappings.sort_by(|a, b| a.0.cmp(&b.0));
+        mappings
+    }
+
+    fn fixed_three_mappings(&self) -> Vec<(String, String)> {
+        let env_branches = &self.config.project.env_branches;
+        let middle = &self.config.project.merge_branch_middle;
+        let count = env_branches.len().saturating_sub(1);
+        env_branches[..count]
+            .iter()
+            .map(|env| (format!("{env}_{middle}_meger"), env.clone()))
+            .collect()
+    }
+
     fn execute_plan(&self, plan: &ExecutionPlan) -> Vec<(bool, String)> {
         match plan {
             ExecutionPlan::Sync { project_idx } => self.execute_sync(*project_idx),
@@ -1132,6 +1258,22 @@ impl App {
                 source_branch,
                 targets,
             } => self.execute_merge(*project_idx, source_branch, targets),
+            ExecutionPlan::MrSingle {
+                project_id,
+                project_name,
+                source_branch,
+                target_branch,
+            } => self.execute_mr_single(*project_id, project_name, source_branch, target_branch),
+            ExecutionPlan::MrBatch {
+                project_id,
+                project_name,
+                ..
+            } => self.execute_mr_batch(*project_id, project_name),
+            ExecutionPlan::MrFixedThree {
+                project_id,
+                project_name,
+                ..
+            } => self.execute_mr_fixed_three(*project_id, project_name),
         }
     }
 
