@@ -320,7 +320,10 @@ impl MenuState {
                             format!("{}. ", actual_index + 1),
                             Style::default().fg(Color::DarkGray),
                         ),
-                        Span::styled(item.as_str(), Style::default().fg(Color::Rgb(153, 153, 200))),
+                        Span::styled(
+                            item.as_str(),
+                            Style::default().fg(Color::Rgb(153, 153, 200)),
+                        ),
                     ]))
                 }
             })
@@ -335,7 +338,8 @@ impl MenuState {
             .selected()
             .and_then(|index| self.details.get(index))
             .map(|lines| {
-                lines.iter()
+                lines
+                    .iter()
                     .map(|line| {
                         Line::from(Span::styled(
                             format!("  {line}"),

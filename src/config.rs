@@ -16,6 +16,8 @@ pub struct Config {
     pub project: ProjectConfig,
     #[serde(default)]
     pub branch_map: HashMap<String, String>,
+    #[serde(default)]
+    pub merge_policy: MergePolicyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,16 @@ pub struct ProjectConfig {
     pub env_branches: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergePolicyConfig {
+    #[serde(default = "default_protected_targets")]
+    pub protected_targets: Vec<String>,
+    #[serde(default = "default_auto_merge_delay_seconds")]
+    pub auto_merge_delay_seconds: u64,
+    #[serde(default = "default_auto_merge_retry_count")]
+    pub auto_merge_retry_count: u32,
+}
+
 fn default_env_branches() -> Vec<String> {
     vec![
         "uat".to_string(),
@@ -40,6 +52,28 @@ fn default_env_branches() -> Vec<String> {
         "stage".to_string(),
         "pre_prod".to_string(),
     ]
+}
+
+fn default_protected_targets() -> Vec<String> {
+    vec!["master".to_string(), "main".to_string()]
+}
+
+fn default_auto_merge_delay_seconds() -> u64 {
+    10
+}
+
+fn default_auto_merge_retry_count() -> u32 {
+    3
+}
+
+impl Default for MergePolicyConfig {
+    fn default() -> Self {
+        Self {
+            protected_targets: default_protected_targets(),
+            auto_merge_delay_seconds: default_auto_merge_delay_seconds(),
+            auto_merge_retry_count: default_auto_merge_retry_count(),
+        }
+    }
 }
 
 impl Config {
@@ -50,7 +84,8 @@ impl Config {
             Some(path) => {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("无法读取配置文件: {}", path.display()))?;
-                let value: toml::Value = toml::from_str(&content).with_context(|| "配置文件解析失败")?;
+                let value: toml::Value =
+                    toml::from_str(&content).with_context(|| "配置文件解析失败")?;
                 let mut config = Self::parse(value)?;
                 config.ensure_branch_map();
                 config.validate()?;
@@ -154,6 +189,14 @@ impl Config {
         {
             bail!("branch_map 不能包含空的源分支或目标分支");
         }
+        if self
+            .merge_policy
+            .protected_targets
+            .iter()
+            .any(|branch| branch.trim().is_empty())
+        {
+            bail!("merge_policy.protected_targets 不能包含空分支名");
+        }
         Ok(())
     }
 
@@ -189,6 +232,8 @@ impl Config {
             project: ProjectConfigCompat,
             #[serde(default)]
             branch_map: HashMap<String, String>,
+            #[serde(default)]
+            merge_policy: MergePolicyConfig,
         }
 
         #[derive(Debug, Deserialize)]
@@ -218,6 +263,7 @@ impl Config {
                 env_branches: compat.project.env_branches,
             },
             branch_map: compat.branch_map,
+            merge_policy: compat.merge_policy,
         })
     }
 
@@ -245,6 +291,7 @@ impl Config {
                 env_branches,
             },
             branch_map,
+            merge_policy: MergePolicyConfig::default(),
         };
 
         // Preview
@@ -267,6 +314,18 @@ impl Config {
         for (src, tgt) in &config.branch_map {
             println!("    {src} -> {tgt}");
         }
+        println!(
+            "  protected_targets     = {:?}",
+            config.merge_policy.protected_targets
+        );
+        println!(
+            "  auto_merge_delay      = {}s",
+            config.merge_policy.auto_merge_delay_seconds
+        );
+        println!(
+            "  auto_merge_retries    = {}",
+            config.merge_policy.auto_merge_retry_count
+        );
 
         let save_path = Self::default_global_config_path();
 
@@ -303,6 +362,12 @@ env_branches = ["dev", "test"]
         let config = Config::parse(value).expect("legacy config should parse");
         assert_eq!(config.project.root_dirs, vec!["/tmp/code".to_string()]);
         assert_eq!(config.project.merge_branch_middle, "henry");
+        assert_eq!(
+            config.merge_policy.protected_targets,
+            vec!["master".to_string(), "main".to_string()]
+        );
+        assert_eq!(config.merge_policy.auto_merge_delay_seconds, 10);
+        assert_eq!(config.merge_policy.auto_merge_retry_count, 3);
     }
 }
 

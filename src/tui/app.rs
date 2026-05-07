@@ -11,7 +11,7 @@ use std::process::Command;
 use crate::config::Config;
 use crate::git;
 use crate::gitlab::GitLabClient;
-use crate::project::{self, Project};
+use crate::project::{self, ProgressUpdate, Project};
 use crate::tui::checklist::{ChecklistAction, ChecklistState};
 use crate::tui::input::{InputAction, InputState};
 use crate::tui::menu::{MenuAction, MenuState};
@@ -39,6 +39,20 @@ enum Page {
         state: InputState,
     },
     ConfigGitLabTokenInput {
+        state: InputState,
+    },
+    ConfigProtectedTargetsMenu,
+    ConfigProtectedTargetActions {
+        index: usize,
+    },
+    ConfigProtectedTargetInput {
+        index: Option<usize>,
+        state: InputState,
+    },
+    ConfigAutoMergeDelayInput {
+        state: InputState,
+    },
+    ConfigAutoMergeRetryInput {
         state: InputState,
     },
     ConfigProjectRootInput {
@@ -134,6 +148,12 @@ enum MrMode {
     BatchCustom,
 }
 
+#[derive(Clone, Copy)]
+enum ProtectedMergeMode {
+    Merge,
+    Skip,
+}
+
 #[derive(Clone)]
 enum ExecutionPlan {
     Sync {
@@ -226,6 +246,19 @@ impl App {
                                 state: self.config_gitlab_token_input(),
                             });
                         }
+                        Some(ConfigMenuAction::EditProtectedTargets) => {
+                            page_stack.push(Page::ConfigProtectedTargetsMenu);
+                        }
+                        Some(ConfigMenuAction::EditAutoMergeDelay) => {
+                            page_stack.push(Page::ConfigAutoMergeDelayInput {
+                                state: self.config_auto_merge_delay_input(),
+                            });
+                        }
+                        Some(ConfigMenuAction::EditAutoMergeRetry) => {
+                            page_stack.push(Page::ConfigAutoMergeRetryInput {
+                                state: self.config_auto_merge_retry_input(),
+                            });
+                        }
                         Some(ConfigMenuAction::EditMergeMiddle) => {
                             page_stack.push(Page::ConfigMergeMiddleInput {
                                 state: self.config_merge_middle_input(),
@@ -246,6 +279,102 @@ impl App {
                             page_stack.pop();
                         }
                         Some(ConfigMenuAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigProtectedTargetsMenu => {
+                    let action = self.show_config_protected_targets_menu(terminal)?;
+                    match action {
+                        Some(ConfigProtectedTargetsAction::Add) => {
+                            page_stack.push(Page::ConfigProtectedTargetInput {
+                                index: None,
+                                state: self.config_protected_target_input(None),
+                            });
+                        }
+                        Some(ConfigProtectedTargetsAction::Select(index)) => {
+                            page_stack.push(Page::ConfigProtectedTargetActions { index });
+                        }
+                        Some(ConfigProtectedTargetsAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigProtectedTargetsAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigProtectedTargetActions { index } => {
+                    let current_index = *index;
+                    let action =
+                        self.show_config_protected_target_actions(terminal, current_index)?;
+                    match action {
+                        Some(ConfigProtectedTargetAction::Edit) => {
+                            page_stack.push(Page::ConfigProtectedTargetInput {
+                                index: Some(current_index),
+                                state: self.config_protected_target_input(Some(current_index)),
+                            });
+                        }
+                        Some(ConfigProtectedTargetAction::Delete) => {
+                            if self.config.merge_policy.protected_targets.len() <= 1 {
+                                page_stack.push(Page::ExecuteResult {
+                                    lines: vec![(
+                                        false,
+                                        "至少需要保留一个保护目标分支".to_string(),
+                                    )],
+                                });
+                            } else {
+                                match self.persist_config_change(|config| {
+                                    config.merge_policy.protected_targets.remove(current_index);
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        page_stack.push(Page::ExecuteResult {
+                                            lines: vec![(
+                                                false,
+                                                format!("删除保护目标分支失败: {err:#}"),
+                                            )],
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Some(ConfigProtectedTargetAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(ConfigProtectedTargetAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigProtectedTargetInput { index, state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let branch = value.trim();
+                            if branch.is_empty() {
+                                state.error = Some("保护目标分支不能为空".to_string());
+                            } else {
+                                let new_branch = branch.to_string();
+                                match self.persist_config_change(|config| match index {
+                                    Some(edit_index) => {
+                                        config.merge_policy.protected_targets[*edit_index] =
+                                            new_branch;
+                                    }
+                                    None => config.merge_policy.protected_targets.push(new_branch),
+                                }) {
+                                    Ok(()) => {
+                                        page_stack.pop();
+                                    }
+                                    Err(err) => {
+                                        state.error = Some(format!("保存失败: {err:#}"));
+                                    }
+                                }
+                            }
+                        }
+                        Some(InputAction::PickFolder) => {}
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
                         None => {}
                     }
                 }
@@ -292,7 +421,10 @@ impl App {
                                     }
                                     Err(err) => {
                                         page_stack.push(Page::ExecuteResult {
-                                            lines: vec![(false, format!("删除项目根目录失败: {err:#}"))],
+                                            lines: vec![(
+                                                false,
+                                                format!("删除项目根目录失败: {err:#}"),
+                                            )],
                                         });
                                     }
                                 }
@@ -314,7 +446,9 @@ impl App {
                                     let edit_index = *index;
                                     match self.persist_config_change(|config| {
                                         match edit_index {
-                                            Some(index) => config.project.root_dirs[index] = new_value,
+                                            Some(index) => {
+                                                config.project.root_dirs[index] = new_value
+                                            }
                                             None => config.project.root_dirs.push(new_value),
                                         }
                                         Self::dedupe_root_dirs(&mut config.project.root_dirs);
@@ -402,6 +536,68 @@ impl App {
                                     Err(err) => {
                                         state.error = Some(format!("保存失败: {err:#}"));
                                     }
+                                }
+                            }
+                        }
+                        Some(InputAction::PickFolder) => {}
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigAutoMergeDelayInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let value = value.trim();
+                            match value.parse::<u64>() {
+                                Ok(seconds) => {
+                                    match self.persist_config_change(|config| {
+                                        config.merge_policy.auto_merge_delay_seconds = seconds;
+                                    }) {
+                                        Ok(()) => {
+                                            page_stack.pop();
+                                        }
+                                        Err(err) => {
+                                            state.error = Some(format!("保存失败: {err:#}"));
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    state.error = Some("请输入非负整数秒数".to_string());
+                                }
+                            }
+                        }
+                        Some(InputAction::PickFolder) => {}
+                        Some(InputAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(InputAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::ConfigAutoMergeRetryInput { state } => {
+                    terminal.draw(|f| state.render(f))?;
+                    match state.handle_key_event() {
+                        Some(InputAction::Submit(value)) => {
+                            let value = value.trim();
+                            match value.parse::<u32>() {
+                                Ok(retries) => {
+                                    match self.persist_config_change(|config| {
+                                        config.merge_policy.auto_merge_retry_count = retries;
+                                    }) {
+                                        Ok(()) => {
+                                            page_stack.pop();
+                                        }
+                                        Err(err) => {
+                                            state.error = Some(format!("保存失败: {err:#}"));
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    state.error = Some("请输入非负整数次数".to_string());
                                 }
                             }
                         }
@@ -953,7 +1149,27 @@ impl App {
                     let action = self.show_execution_preview(terminal, &current_plan)?;
                     match action {
                         Some(PreviewAction::Confirm) => {
-                            let results = self.execute_plan(&current_plan);
+                            let protected_merge_mode = if let Some(targets) =
+                                self.protected_targets_for_plan(&current_plan)
+                            {
+                                match self.show_protected_merge_prompt(terminal, &targets)? {
+                                    Some(ProtectedMergePromptAction::MergeNow) => {
+                                        ProtectedMergeMode::Merge
+                                    }
+                                    Some(ProtectedMergePromptAction::SkipMerge) => {
+                                        ProtectedMergeMode::Skip
+                                    }
+                                    Some(ProtectedMergePromptAction::Back) => {
+                                        continue;
+                                    }
+                                    Some(ProtectedMergePromptAction::Quit) => break,
+                                    None => continue,
+                                }
+                            } else {
+                                ProtectedMergeMode::Merge
+                            };
+                            let results =
+                                self.execute_plan(terminal, &current_plan, protected_merge_mode)?;
                             page_stack.push(Page::ExecuteResult { lines: results });
                         }
                         Some(PreviewAction::Back) => {
@@ -1177,6 +1393,9 @@ impl App {
             "修改合并分支中间名".to_string(),
             "修改 GitLab 地址".to_string(),
             "修改 GitLab Token".to_string(),
+            "管理保护目标分支".to_string(),
+            "修改自动合并等待秒数".to_string(),
+            "修改自动合并重试次数".to_string(),
             "预览并重建默认 MR 映射".to_string(),
             "返回主菜单".to_string(),
         ];
@@ -1192,7 +1411,10 @@ impl App {
         };
         let details = vec![
             vec![
-                format!("当前共 {} 个项目根目录", self.config.project.root_dirs.len()),
+                format!(
+                    "当前共 {} 个项目根目录",
+                    self.config.project.root_dirs.len()
+                ),
                 format!("当前值: {}", self.config.project.root_dirs.join(" | ")),
                 "gmux 会汇总扫描这些目录下的本地 Git 仓库。".to_string(),
             ],
@@ -1224,6 +1446,31 @@ impl App {
                 "修改后后续 GitLab API 请求会立即使用新的 Token。".to_string(),
             ],
             vec![
+                format!(
+                    "当前共 {} 个保护目标分支",
+                    self.config.merge_policy.protected_targets.len()
+                ),
+                format!(
+                    "当前值: {}",
+                    self.config.merge_policy.protected_targets.join(" ")
+                ),
+                "命中这些目标分支时，会先询问是否继续自动合并。".to_string(),
+            ],
+            vec![
+                format!(
+                    "当前值: {} 秒",
+                    self.config.merge_policy.auto_merge_delay_seconds
+                ),
+                "非保护目标分支在自动合并前会先等待这段时间。".to_string(),
+            ],
+            vec![
+                format!(
+                    "当前值: {} 次",
+                    self.config.merge_policy.auto_merge_retry_count
+                ),
+                "非保护目标分支自动合并失败时，最多重试这些次数。".to_string(),
+            ],
+            vec![
                 "先预览即将生成的默认映射，再决定是否覆盖当前 branch_map。".to_string(),
                 "适合在你调整了环境分支或 merge_branch_middle 之后使用。".to_string(),
             ],
@@ -1244,6 +1491,8 @@ impl App {
             "项目根目录支持多目录配置，适合把不同业务线或不同工作区一起纳入扫描。".to_string(),
             "环境分支列表决定本地同步和本地合并的目标分支集合。".to_string(),
             "MR 映射决定 GitLab 批量创建 MR 时会使用哪些 source -> target 关系。".to_string(),
+            "保护目标分支决定哪些目标分支需要额外确认后才会自动合并。".to_string(),
+            "非保护目标分支会按“等待秒数 + 重试次数”策略自动合并。".to_string(),
             "这里的修改会自动写回 ~/.config/gmux/gmux.toml，不需要额外手动保存。".to_string(),
         ]);
 
@@ -1257,10 +1506,124 @@ impl App {
                     MenuAction::Select(3) => Some(ConfigMenuAction::EditMergeMiddle),
                     MenuAction::Select(4) => Some(ConfigMenuAction::EditGitLabHost),
                     MenuAction::Select(5) => Some(ConfigMenuAction::EditGitLabToken),
-                    MenuAction::Select(6) => Some(ConfigMenuAction::ResetBranchMap),
-                    MenuAction::Select(7) => Some(ConfigMenuAction::Back),
+                    MenuAction::Select(6) => Some(ConfigMenuAction::EditProtectedTargets),
+                    MenuAction::Select(7) => Some(ConfigMenuAction::EditAutoMergeDelay),
+                    MenuAction::Select(8) => Some(ConfigMenuAction::EditAutoMergeRetry),
+                    MenuAction::Select(9) => Some(ConfigMenuAction::ResetBranchMap),
+                    MenuAction::Select(10) => Some(ConfigMenuAction::Back),
                     MenuAction::Back => Some(ConfigMenuAction::Back),
                     MenuAction::Quit => Some(ConfigMenuAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_protected_targets_menu(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<Option<ConfigProtectedTargetsAction>> {
+        let mut items = vec!["新增保护目标分支".to_string()];
+        items.extend(self.config.merge_policy.protected_targets.iter().cloned());
+        items.push("返回配置管理".to_string());
+
+        let mut details = vec![vec!["添加一个新的保护目标分支。".to_string()]];
+        details.extend(
+            self.config
+                .merge_policy
+                .protected_targets
+                .iter()
+                .enumerate()
+                .map(|(index, branch)| {
+                    vec![
+                        format!("当前顺序: {}", index + 1),
+                        format!("分支名: {branch}"),
+                        "命中该目标分支时，会先询问是否继续自动合并。".to_string(),
+                    ]
+                }),
+        );
+        details.push(vec!["返回上一层配置管理。".to_string()]);
+
+        let mut menu = MenuState::new(
+            "gmux / 保护目标分支",
+            "逐条管理需要额外确认的目标分支",
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "这里定义哪些目标分支属于保护分支，例如 master、main 或生产主线。".to_string(),
+            "当 GitLab MR 的目标分支命中这里的列表时，gmux 会先问你是否继续自动合并。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                let branch_count = self.config.merge_policy.protected_targets.len();
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ConfigProtectedTargetsAction::Add),
+                    MenuAction::Select(i) if i == branch_count + 1 => {
+                        Some(ConfigProtectedTargetsAction::Back)
+                    }
+                    MenuAction::Select(i) if i > 0 && i <= branch_count => {
+                        Some(ConfigProtectedTargetsAction::Select(i - 1))
+                    }
+                    MenuAction::Back => Some(ConfigProtectedTargetsAction::Back),
+                    MenuAction::Quit => Some(ConfigProtectedTargetsAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_config_protected_target_actions(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        index: usize,
+    ) -> Result<Option<ConfigProtectedTargetAction>> {
+        let branch = self
+            .config
+            .merge_policy
+            .protected_targets
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let mut items = vec!["编辑分支名".to_string()];
+        let mut details = vec![vec![
+            format!("当前分支: {branch}"),
+            "重新指定这个保护目标分支。".to_string(),
+        ]];
+        if self.config.merge_policy.protected_targets.len() > 1 {
+            items.push("删除分支".to_string());
+            details.push(vec![
+                format!("当前分支: {branch}"),
+                "从保护目标列表中移除它，后续命中时不再额外确认。".to_string(),
+            ]);
+        }
+        items.push("返回上一层".to_string());
+        details.push(vec!["返回保护目标分支列表。".to_string()]);
+
+        let mut menu = MenuState::new("gmux / 保护目标分支", &format!("正在管理: {branch}"), items)
+            .with_details(details)
+            .with_help(vec![
+                "保护目标分支只影响 GitLab MR 的自动合并策略。".to_string(),
+                "删除后，这个目标分支会按普通分支处理，走等待 + 重试策略。".to_string(),
+            ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ConfigProtectedTargetAction::Edit),
+                    MenuAction::Select(1)
+                        if self.config.merge_policy.protected_targets.len() > 1 =>
+                    {
+                        Some(ConfigProtectedTargetAction::Delete)
+                    }
+                    MenuAction::Select(1) | MenuAction::Select(2) => {
+                        Some(ConfigProtectedTargetAction::Back)
+                    }
+                    MenuAction::Back => Some(ConfigProtectedTargetAction::Back),
+                    MenuAction::Quit => Some(ConfigProtectedTargetAction::Quit),
                     _ => None,
                 });
             }
@@ -1343,18 +1706,14 @@ impl App {
         }));
         details.push(vec!["返回上一层配置管理。".to_string()]);
 
-        let mut menu = MenuState::new(
-            "gmux / 项目根目录",
-            "管理一个或多个项目扫描目录",
-            items,
-        )
-        .with_details(details)
-        .with_search("过滤项目根目录")
-        .with_help(vec![
-            "这里管理 gmux 会扫描哪些本地工作目录。".to_string(),
-            "支持同时配置多个项目根目录，适合不同业务线或不同代码区。".to_string(),
-            "如果多个目录里有同名仓库，项目选择页会显示来源目录帮助你区分。".to_string(),
-        ]);
+        let mut menu = MenuState::new("gmux / 项目根目录", "管理一个或多个项目扫描目录", items)
+            .with_details(details)
+            .with_search("过滤项目根目录")
+            .with_help(vec![
+                "这里管理 gmux 会扫描哪些本地工作目录。".to_string(),
+                "支持同时配置多个项目根目录，适合不同业务线或不同代码区。".to_string(),
+                "如果多个目录里有同名仓库，项目选择页会显示来源目录帮助你区分。".to_string(),
+            ]);
 
         loop {
             terminal.draw(|f| menu.render(f))?;
@@ -1818,7 +2177,11 @@ impl App {
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<ProjectAction>> {
-        let items: Vec<String> = self.projects.iter().map(|p| p.display_name.clone()).collect();
+        let items: Vec<String> = self
+            .projects
+            .iter()
+            .map(|p| p.display_name.clone())
+            .collect();
         let details: Vec<Vec<String>> = self
             .projects
             .iter()
@@ -2071,6 +2434,147 @@ impl App {
                 }
             }
         }
+    }
+
+    fn show_protected_merge_prompt(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        targets: &[String],
+    ) -> Result<Option<ProtectedMergePromptAction>> {
+        let items = vec![
+            "继续自动合并保护分支".to_string(),
+            "只创建并审批，暂不自动合并".to_string(),
+            "返回执行预览".to_string(),
+        ];
+        let details = vec![
+            {
+                let mut lines = vec!["将继续对这些保护目标分支执行自动合并:".to_string()];
+                lines.extend(targets.iter().map(|target| format!("- {target}")));
+                lines
+            },
+            {
+                let mut lines =
+                    vec!["仍会创建并审批 MR，但会跳过这些保护目标分支的自动合并:".to_string()];
+                lines.extend(targets.iter().map(|target| format!("- {target}")));
+                lines
+            },
+            vec!["返回上一页，重新检查本次执行预览。".to_string()],
+        ];
+
+        let mut menu = MenuState::new(
+            "gmux / 保护分支确认",
+            "本次命中了保护目标分支，确认是否继续自动合并",
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "保护目标分支一般是 master、main 或生产主线。".to_string(),
+            "如果你选择跳过自动合并，gmux 仍会先创建 MR 并完成审批。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(ProtectedMergePromptAction::MergeNow),
+                    MenuAction::Select(1) => Some(ProtectedMergePromptAction::SkipMerge),
+                    MenuAction::Select(2) => Some(ProtectedMergePromptAction::Back),
+                    MenuAction::Back => Some(ProtectedMergePromptAction::Back),
+                    MenuAction::Quit => Some(ProtectedMergePromptAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn render_execution_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        title: &str,
+        subtitle: &str,
+        progress: &ProgressUpdate,
+    ) -> Result<()> {
+        use ratatui::{
+            layout::{Constraint, Direction, Layout},
+            style::{Color, Modifier, Style},
+            text::{Line, Span},
+            widgets::{Block, Borders, Gauge, Paragraph},
+        };
+
+        let ratio = if progress.total == 0 {
+            0.0
+        } else {
+            progress.current as f64 / progress.total as f64
+        };
+
+        terminal.draw(|f| {
+            let area = f.area();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(5),
+                    Constraint::Min(1),
+                ])
+                .split(area);
+
+            let header = Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("  {title}"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!("  {subtitle}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(Color::Rgb(81, 81, 81))),
+            );
+
+            let gauge = Gauge::default()
+                .block(
+                    Block::default()
+                        .title("  执行进度  ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(81, 81, 81))),
+                )
+                .gauge_style(Style::default().fg(Color::Cyan))
+                .ratio(ratio)
+                .label(format!("{}/{}", progress.current, progress.total));
+
+            let details = Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("  当前任务: {}", progress.summary),
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(Span::styled(
+                    format!("  当前步骤: {}", progress.detail),
+                    Style::default().fg(Color::Rgb(200, 200, 200)),
+                )),
+                Line::from(Span::styled(
+                    "  正在执行，请稍候...",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+            .block(
+                Block::default()
+                    .title("  当前状态  ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Rgb(81, 81, 81))),
+            );
+
+            f.render_widget(header, chunks[0]);
+            f.render_widget(gauge, chunks[1]);
+            f.render_widget(details, chunks[2]);
+        })?;
+
+        Ok(())
     }
 
     fn show_target_branch(
@@ -2379,10 +2883,21 @@ impl App {
         Ok(())
     }
 
-    fn execute_sync(&self, project_idx: usize) -> Vec<(bool, String)> {
+    fn execute_sync(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_idx: usize,
+    ) -> Result<Vec<(bool, String)>> {
         let project = &self.projects[project_idx];
-        let results = project::sync_and_push(project, &self.config);
-        results
+        let results = project::sync_and_push_with_progress(project, &self.config, |progress| {
+            let _ = self.render_execution_progress(
+                terminal,
+                "gmux / 执行中",
+                "正在同步环境分支和对应合并分支",
+                progress,
+            );
+        });
+        Ok(results
             .into_iter()
             .map(|r| {
                 (
@@ -2390,7 +2905,7 @@ impl App {
                     format!("{} -> {}: {}", r.branch, r.target, r.message),
                 )
             })
-            .collect()
+            .collect())
     }
 
     fn targets_for_operation(&self, project_idx: usize, operation: &LocalOp) -> Vec<String> {
@@ -2406,17 +2921,26 @@ impl App {
 
     fn execute_merge(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_idx: usize,
         source_branch: &str,
         targets: &[String],
-    ) -> Vec<(bool, String)> {
+    ) -> Result<Vec<(bool, String)>> {
         if targets.is_empty() {
-            return vec![(false, "未选择目标分支".to_string())];
+            return Ok(vec![(false, "未选择目标分支".to_string())]);
         }
 
         let project = &self.projects[project_idx];
-        let results = project::merge_to_targets(project, source_branch, &targets);
-        results
+        let results =
+            project::merge_to_targets_with_progress(project, source_branch, targets, |progress| {
+                let _ = self.render_execution_progress(
+                    terminal,
+                    "gmux / 执行中",
+                    "正在执行本地合并并推送目标分支",
+                    progress,
+                );
+            });
+        Ok(results
             .into_iter()
             .map(|r| {
                 (
@@ -2424,7 +2948,72 @@ impl App {
                     format!("{} -> {}: {}", r.branch, r.target, r.message),
                 )
             })
-            .collect()
+            .collect())
+    }
+
+    fn handle_mr_merge_policy(
+        &self,
+        project_id: u64,
+        mr_iid: u64,
+        source_branch: &str,
+        target_branch: &str,
+        protected_merge_mode: ProtectedMergeMode,
+    ) -> Vec<(bool, String)> {
+        if self.is_protected_target(target_branch) {
+            return match protected_merge_mode {
+                ProtectedMergeMode::Merge => match self.gitlab.merge_mr(project_id, mr_iid) {
+                    Ok(state) if state == "merged" => {
+                        vec![(
+                            true,
+                            format!("保护分支已合并: {source_branch} -> {target_branch}"),
+                        )]
+                    }
+                    Ok(state) => vec![(
+                        false,
+                        format!("保护分支合并状态异常 {source_branch} -> {target_branch}: {state}"),
+                    )],
+                    Err(err) => vec![(
+                        false,
+                        format!("保护分支合并失败 {source_branch} -> {target_branch}: {err}"),
+                    )],
+                },
+                ProtectedMergeMode::Skip => vec![(
+                    true,
+                    format!("已跳过保护分支自动合并: {source_branch} -> {target_branch}"),
+                )],
+            };
+        }
+
+        let mut lines = vec![(
+            true,
+            format!(
+                "普通分支自动合并策略: 等待 {} 秒，失败最多重试 {} 次",
+                self.config.merge_policy.auto_merge_delay_seconds,
+                self.config.merge_policy.auto_merge_retry_count
+            ),
+        )];
+        match self.gitlab.merge_mr_with_retry(
+            project_id,
+            mr_iid,
+            self.config.merge_policy.auto_merge_delay_seconds,
+            self.config.merge_policy.auto_merge_retry_count,
+        ) {
+            Ok(logs) => {
+                lines.extend(logs.into_iter().map(|line| {
+                    (
+                        !line.contains("失败") && !line.contains("异常"),
+                        format!("{source_branch} -> {target_branch}: {line}"),
+                    )
+                }));
+            }
+            Err(err) => {
+                lines.push((
+                    false,
+                    format!("自动合并失败 {source_branch} -> {target_branch}: {err}"),
+                ));
+            }
+        }
+        lines
     }
 
     fn build_execution_preview(&self, plan: &ExecutionPlan) -> (String, String, Vec<String>) {
@@ -2491,7 +3080,7 @@ impl App {
                 source_branch,
                 target_branch,
             } => {
-                let lines = vec![
+                let mut lines = vec![
                     format!("GitLab 项目: {project_name}"),
                     format!("项目 ID: {project_id}"),
                     format!("源分支: {source_branch}"),
@@ -2499,10 +3088,21 @@ impl App {
                     String::new(),
                     "即将执行以下步骤:".to_string(),
                     format!("- 调用 GitLab API 创建 MR: `{source_branch}` -> `{target_branch}`"),
-                    "- 如果创建成功，将继续自动审批并尝试自动合并".to_string(),
-                    String::new(),
-                    "当前只是预览，按 Enter 后才会真正执行。".to_string(),
+                    "- 如果创建成功，将继续自动审批".to_string(),
                 ];
+                if self.is_protected_target(target_branch) {
+                    lines.push(format!(
+                        "- 目标分支 `{target_branch}` 命中保护策略，执行前会再次确认是否自动合并"
+                    ));
+                } else {
+                    lines.push(format!(
+                        "- 自动合并前等待 {} 秒，失败最多重试 {} 次",
+                        self.config.merge_policy.auto_merge_delay_seconds,
+                        self.config.merge_policy.auto_merge_retry_count
+                    ));
+                }
+                lines.push(String::new());
+                lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
 
                 (
                     "gmux / 执行预览".to_string(),
@@ -2525,7 +3125,31 @@ impl App {
                 for (src, tgt) in mappings {
                     lines.push(format!("- 创建 MR: `{src}` -> `{tgt}`"));
                 }
-                lines.push("- 对创建成功的 MR 继续自动审批并尝试自动合并".to_string());
+                lines.push("- 对创建成功的 MR 继续自动审批".to_string());
+                let protected_targets: Vec<String> = mappings
+                    .iter()
+                    .map(|(_, tgt)| tgt)
+                    .filter(|target| self.is_protected_target(target))
+                    .cloned()
+                    .collect();
+                if protected_targets.is_empty() {
+                    lines.push(format!(
+                        "- 普通目标分支自动合并前等待 {} 秒，失败最多重试 {} 次",
+                        self.config.merge_policy.auto_merge_delay_seconds,
+                        self.config.merge_policy.auto_merge_retry_count
+                    ));
+                } else {
+                    lines.push(format!(
+                        "- 命中保护策略的目标分支: {}",
+                        protected_targets.join(", ")
+                    ));
+                    lines.push("- 执行前会再次确认这些保护分支是否继续自动合并".to_string());
+                    lines.push(format!(
+                        "- 其他普通目标分支自动合并前等待 {} 秒，失败最多重试 {} 次",
+                        self.config.merge_policy.auto_merge_delay_seconds,
+                        self.config.merge_policy.auto_merge_retry_count
+                    ));
+                }
                 lines.push(String::new());
                 lines.push("当前只是预览，按 Enter 后才会真正执行。".to_string());
 
@@ -2657,12 +3281,16 @@ impl App {
                 "预览页中的 ahead/behind 信息可以帮助你先判断远端分支状态。".to_string(),
             ],
             ExecutionPlan::MrSingle { .. } => vec![
-                "单个 MR 会先创建 Merge Request，再自动尝试审批与合并。".to_string(),
+                "单个 MR 会先创建 Merge Request，再自动审批。".to_string(),
+                "普通目标分支会按“等待秒数 + 重试次数”自动合并；保护目标分支会先再次确认。"
+                    .to_string(),
                 "这里只有预览，按 Enter 才会真正请求 GitLab API。".to_string(),
                 "如果自动审批或自动合并失败，结果页会单独显示失败阶段。".to_string(),
             ],
             ExecutionPlan::MrBatch { .. } => vec![
-                "批量 MR 会依次创建多组 MR，再对创建成功的 MR 自动尝试审批与合并。".to_string(),
+                "批量 MR 会依次创建多组 MR，再对创建成功的 MR 自动审批。".to_string(),
+                "普通目标分支会按“等待秒数 + 重试次数”自动合并；保护目标分支会先再次确认。"
+                    .to_string(),
                 "如果其中某组失败，不会阻止其它组继续执行。".to_string(),
                 "预览页会先列出这次计划处理的全部映射关系。".to_string(),
             ],
@@ -2828,11 +3456,7 @@ impl App {
         }
 
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
+        if value.is_empty() { None } else { Some(value) }
     }
 
     fn dedupe_root_dirs(root_dirs: &mut Vec<String>) {
@@ -2889,6 +3513,54 @@ impl App {
             "例如 glpat-xxxxxxxxxxxx",
         );
         state.value = self.config.gitlab.token.clone();
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_protected_target_input(&self, index: Option<usize>) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "逐条编辑保护目标分支",
+            "保护目标分支",
+            "例如 master / main / prod",
+        );
+        if let Some(index) = index {
+            state.value = self
+                .config
+                .merge_policy
+                .protected_targets
+                .get(index)
+                .cloned()
+                .unwrap_or_default();
+        }
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_auto_merge_delay_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改自动合并等待秒数",
+            "等待秒数",
+            "例如 10",
+        );
+        state.value = self
+            .config
+            .merge_policy
+            .auto_merge_delay_seconds
+            .to_string();
+        state.cursor_pos = state.value.len();
+        state
+    }
+
+    fn config_auto_merge_retry_input(&self) -> InputState {
+        let mut state = InputState::new(
+            "gmux / 配置管理",
+            "修改自动合并重试次数",
+            "重试次数",
+            "例如 3",
+        );
+        state.value = self.config.merge_policy.auto_merge_retry_count.to_string();
         state.cursor_pos = state.value.len();
         state
     }
@@ -2979,25 +3651,72 @@ impl App {
         Ok(())
     }
 
-    fn execute_plan(&self, plan: &ExecutionPlan) -> Vec<(bool, String)> {
+    fn protected_targets_for_plan(&self, plan: &ExecutionPlan) -> Option<Vec<String>> {
+        let protected_targets = &self.config.merge_policy.protected_targets;
+        let mut matched = match plan {
+            ExecutionPlan::MrSingle { target_branch, .. } => protected_targets
+                .iter()
+                .filter(|branch| *branch == target_branch)
+                .cloned()
+                .collect::<Vec<_>>(),
+            ExecutionPlan::MrBatch { mappings, .. } => mappings
+                .iter()
+                .filter_map(|(_, target)| {
+                    protected_targets
+                        .iter()
+                        .find(|branch| *branch == target)
+                        .cloned()
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        matched.sort();
+        matched.dedup();
+        if matched.is_empty() {
+            None
+        } else {
+            Some(matched)
+        }
+    }
+
+    fn is_protected_target(&self, target_branch: &str) -> bool {
+        self.config
+            .merge_policy
+            .protected_targets
+            .iter()
+            .any(|branch| branch == target_branch)
+    }
+
+    fn execute_plan(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        plan: &ExecutionPlan,
+        protected_merge_mode: ProtectedMergeMode,
+    ) -> Result<Vec<(bool, String)>> {
         match plan {
-            ExecutionPlan::Sync { project_idx } => self.execute_sync(*project_idx),
+            ExecutionPlan::Sync { project_idx } => self.execute_sync(terminal, *project_idx),
             ExecutionPlan::Merge {
                 project_idx,
                 source_branch,
                 targets,
-            } => self.execute_merge(*project_idx, source_branch, targets),
+            } => self.execute_merge(terminal, *project_idx, source_branch, targets),
             ExecutionPlan::MrSingle {
                 project_id,
                 project_name,
                 source_branch,
                 target_branch,
-            } => self.execute_mr_single(*project_id, project_name, source_branch, target_branch),
+            } => self.execute_mr_single(
+                *project_id,
+                project_name,
+                source_branch,
+                target_branch,
+                protected_merge_mode,
+            ),
             ExecutionPlan::MrBatch {
                 project_id,
                 project_name,
                 mappings,
-            } => self.execute_mr_batch(*project_id, project_name, mappings),
+            } => self.execute_mr_batch(*project_id, project_name, mappings, protected_merge_mode),
         }
     }
 
@@ -3007,7 +3726,8 @@ impl App {
         project_name: &str,
         src: &str,
         tgt: &str,
-    ) -> Vec<(bool, String)> {
+        protected_merge_mode: ProtectedMergeMode,
+    ) -> Result<Vec<(bool, String)>> {
         let mut results = Vec::new();
 
         match self.gitlab.create_mr(project_id, project_name, src, tgt) {
@@ -3016,16 +3736,26 @@ impl App {
                     true,
                     format!("MR 创建成功: {} (IID: {})", mr.web_url, mr.iid),
                 ));
-                // Try approve and merge
-                match self.gitlab.approve_and_merge(project_id, mr.iid) {
-                    Ok(()) => results.push((true, "MR 已审批并合并".to_string())),
-                    Err(e) => results.push((false, format!("MR 审批/合并失败: {e}"))),
+                match self.gitlab.approve_mr(project_id, mr.iid) {
+                    Ok(()) => {
+                        results.push((true, "MR 审批成功".to_string()));
+                        results.extend(self.handle_mr_merge_policy(
+                            project_id,
+                            mr.iid,
+                            src,
+                            tgt,
+                            protected_merge_mode,
+                        ));
+                    }
+                    Err(e) => {
+                        results.push((false, format!("MR 审批失败: {e}")));
+                    }
                 }
             }
             Err(e) => results.push((false, format!("创建 MR 失败: {e}"))),
         }
 
-        results
+        Ok(results)
     }
 
     fn execute_mr_batch(
@@ -3033,12 +3763,13 @@ impl App {
         project_id: u64,
         project_name: &str,
         mappings: &[(String, String)],
-    ) -> Vec<(bool, String)> {
+        protected_merge_mode: ProtectedMergeMode,
+    ) -> Result<Vec<(bool, String)>> {
         let mut results = Vec::new();
         let mut mr_list: Vec<(u64, String, String)> = Vec::new();
 
         if mappings.is_empty() {
-            return vec![(false, "未选择任何分支映射".to_string())];
+            return Ok(vec![(false, "未选择任何分支映射".to_string())]);
         }
 
         for (src, tgt) in mappings {
@@ -3056,15 +3787,23 @@ impl App {
             }
         }
 
-        // Auto approve and merge
         for (iid, src, tgt) in &mr_list {
-            match self.gitlab.approve_and_merge(project_id, *iid) {
-                Ok(()) => results.push((true, format!("已审批并合并: {src} -> {tgt}"))),
-                Err(e) => results.push((false, format!("审批/合并失败 {src} -> {tgt}: {e}"))),
+            match self.gitlab.approve_mr(project_id, *iid) {
+                Ok(()) => {
+                    results.push((true, format!("审批成功: {src} -> {tgt}")));
+                    results.extend(self.handle_mr_merge_policy(
+                        project_id,
+                        *iid,
+                        src,
+                        tgt,
+                        protected_merge_mode,
+                    ));
+                }
+                Err(e) => results.push((false, format!("审批失败 {src} -> {tgt}: {e}"))),
             }
         }
 
-        results
+        Ok(results)
     }
 }
 
@@ -3107,10 +3846,27 @@ enum ConfigMenuAction {
     EditProjectRoots,
     EditGitLabHost,
     EditGitLabToken,
+    EditProtectedTargets,
+    EditAutoMergeDelay,
+    EditAutoMergeRetry,
     EditMergeMiddle,
     EditEnvBranches,
     EditBranchMap,
     ResetBranchMap,
+    Back,
+    Quit,
+}
+
+enum ConfigProtectedTargetsAction {
+    Add,
+    Select(usize),
+    Back,
+    Quit,
+}
+
+enum ConfigProtectedTargetAction {
+    Edit,
+    Delete,
     Back,
     Quit,
 }
@@ -3205,6 +3961,13 @@ enum TargetBranchAction {
 
 enum PreviewAction {
     Confirm,
+    Back,
+    Quit,
+}
+
+enum ProtectedMergePromptAction {
+    MergeNow,
+    SkipMerge,
     Back,
     Quit,
 }
