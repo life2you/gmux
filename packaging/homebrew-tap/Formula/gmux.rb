@@ -1,8 +1,8 @@
 class Gmux < Formula
   desc "Terminal Git workflow tool for multi-env branch sync and GitLab MR automation"
   homepage "https://github.com/life2you/gmux"
-  url "https://github.com/life2you/gmux/archive/refs/tags/v0.1.4.tar.gz"
-  sha256 "9a3fe6b596ecc315bcc27bd6a2f9cbbeb6f00f72269584976e0190c8cf2338be"
+  url "https://github.com/life2you/gmux/archive/refs/tags/v0.1.5.tar.gz"
+  sha256 "30e11b106d1457c4db15dc11c2326529af2fc87402d938ec330f29290fb4715d"
   license "MIT"
 
   depends_on "rust" => :build
