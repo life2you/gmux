@@ -1249,21 +1249,41 @@ impl App {
                                 });
                             }
                             MrMode::Batch => {
-                                page_stack.push(Page::ExecutionPreview {
-                                    plan: ExecutionPlan::MrBatch {
-                                        project_id: id,
-                                        project_name: name.clone(),
-                                        mappings: self.branch_map_entries(),
-                                    },
-                                });
+                                let mappings = self.batch_mr_mappings();
+                                if mappings.is_empty() {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(
+                                            false,
+                                            "没有可用于批量 MR 的非保护分支映射".to_string(),
+                                        )],
+                                    });
+                                } else {
+                                    page_stack.push(Page::ExecutionPreview {
+                                        plan: ExecutionPlan::MrBatch {
+                                            project_id: id,
+                                            project_name: name.clone(),
+                                            mappings,
+                                        },
+                                    });
+                                }
                             }
                             MrMode::BatchCustom => {
-                                page_stack.push(Page::BranchMapMultiSelect {
-                                    project_id: id,
-                                    project_name: name.clone(),
-                                    state: self.branch_map_multi_state(),
-                                    mappings: self.branch_map_entries(),
-                                });
+                                let mappings = self.batch_mr_mappings();
+                                if mappings.is_empty() {
+                                    page_stack.push(Page::ExecuteResult {
+                                        lines: vec![(
+                                            false,
+                                            "没有可用于批量 MR 的非保护分支映射".to_string(),
+                                        )],
+                                    });
+                                } else {
+                                    page_stack.push(Page::BranchMapMultiSelect {
+                                        project_id: id,
+                                        project_name: name.clone(),
+                                        state: self.branch_map_multi_state(),
+                                        mappings,
+                                    });
+                                }
                             }
                         },
                         Some(GitLabAction::Back) => {
@@ -2738,16 +2758,23 @@ impl App {
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<MrMenuAction>> {
+        let batch_mappings = self.batch_mr_mappings();
         let items = vec![
             "单个创建".to_string(),
-            format!("批量创建（全部 {} 组映射）", self.config.branch_map.len()),
+            format!("批量创建（{} 组可用映射）", batch_mappings.len()),
             "自定义选择多组映射".to_string(),
             "返回主菜单".to_string(),
         ];
         let details = vec![
             vec!["先选项目，再选一组源/目标分支映射，创建一个 MR。".to_string()],
-            vec!["按配置中的 branch_map，对一个项目批量创建全部映射对应的 MR，并自动尝试审批和合并。".to_string()],
-            vec!["从 branch_map 中手动勾选部分映射，适合只处理部分环境或临时链路。".to_string()],
+            vec![
+                "按配置中的 branch_map 批量创建 MR，但会自动排除目标分支属于保护分支的映射。"
+                    .to_string(),
+            ],
+            vec![
+                "从非保护目标分支的映射中手动勾选部分项，适合只处理部分环境或临时链路。"
+                    .to_string(),
+            ],
             vec!["不执行 MR 操作。".to_string()],
         ];
 
@@ -2755,9 +2782,9 @@ impl App {
             .with_details(details)
             .with_help(vec![
                 "单个创建：手动选一组源/目标分支映射创建 MR。".to_string(),
-                "批量创建：按配置中的全部分支映射批量创建 MR，并对成功的 MR 自动尝试审批与合并。"
+                "批量创建：只处理目标分支不在保护列表里的映射，并对成功的 MR 自动尝试审批与合并。"
                     .to_string(),
-                "自定义多选：只处理你本次勾选的映射，适合非标准发布链路。".to_string(),
+                "自定义多选：只会展示非保护目标分支的映射，适合非标准发布链路。".to_string(),
             ]);
 
         loop {
@@ -3354,8 +3381,15 @@ impl App {
         mappings
     }
 
+    fn batch_mr_mappings(&self) -> Vec<(String, String)> {
+        filter_batch_mr_mappings(
+            self.branch_map_entries(),
+            &self.config.merge_policy.protected_targets,
+        )
+    }
+
     fn branch_map_multi_state(&self) -> ChecklistState {
-        let mappings = self.branch_map_entries();
+        let mappings = self.batch_mr_mappings();
         let items: Vec<String> = mappings
             .iter()
             .map(|(src, tgt)| format!("{src} -> {tgt}"))
@@ -3372,7 +3406,8 @@ impl App {
         )
         .with_details(details)
         .with_help(vec![
-            "这里展示配置文件 branch_map 中的全部映射关系。".to_string(),
+            "这里展示配置文件 branch_map 中可用于批量 MR 的映射关系。".to_string(),
+            "目标分支命中保护分支列表的映射会被自动排除。".to_string(),
             "用空格勾选一组或多组映射，适合只处理部分环境或临时链路。".to_string(),
             "Enter 后会先进入执行预览，不会立刻请求 GitLab API。".to_string(),
         ])
@@ -3706,6 +3741,7 @@ impl App {
                 source_branch,
                 target_branch,
             } => self.execute_mr_single(
+                terminal,
                 *project_id,
                 project_name,
                 source_branch,
@@ -3716,12 +3752,19 @@ impl App {
                 project_id,
                 project_name,
                 mappings,
-            } => self.execute_mr_batch(*project_id, project_name, mappings, protected_merge_mode),
+            } => self.execute_mr_batch(
+                terminal,
+                *project_id,
+                project_name,
+                mappings,
+                protected_merge_mode,
+            ),
         }
     }
 
     fn execute_mr_single(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_id: u64,
         project_name: &str,
         src: &str,
@@ -3729,6 +3772,16 @@ impl App {
         protected_merge_mode: ProtectedMergeMode,
     ) -> Result<Vec<(bool, String)>> {
         let mut results = Vec::new();
+        let total_steps = 3usize;
+        let summary = format!("{src} -> {tgt}");
+
+        self.render_mr_progress(
+            terminal,
+            1,
+            total_steps,
+            &summary,
+            &format!("创建 MR [{project_name}]"),
+        )?;
 
         match self.gitlab.create_mr(project_id, project_name, src, tgt) {
             Ok(mr) => {
@@ -3736,9 +3789,17 @@ impl App {
                     true,
                     format!("MR 创建成功: {} (IID: {})", mr.web_url, mr.iid),
                 ));
+                self.render_mr_progress(terminal, 2, total_steps, &summary, "审批 MR")?;
                 match self.gitlab.approve_mr(project_id, mr.iid) {
                     Ok(()) => {
                         results.push((true, "MR 审批成功".to_string()));
+                        self.render_mr_progress(
+                            terminal,
+                            3,
+                            total_steps,
+                            &summary,
+                            &self.mr_merge_progress_detail(tgt, protected_merge_mode),
+                        )?;
                         results.extend(self.handle_mr_merge_policy(
                             project_id,
                             mr.iid,
@@ -3749,10 +3810,33 @@ impl App {
                     }
                     Err(e) => {
                         results.push((false, format!("MR 审批失败: {e}")));
+                        self.render_mr_progress(
+                            terminal,
+                            3,
+                            total_steps,
+                            &summary,
+                            "跳过自动合并，因审批失败",
+                        )?;
                     }
                 }
             }
-            Err(e) => results.push((false, format!("创建 MR 失败: {e}"))),
+            Err(e) => {
+                results.push((false, format!("创建 MR 失败: {e}")));
+                self.render_mr_progress(
+                    terminal,
+                    2,
+                    total_steps,
+                    &summary,
+                    "跳过审批，因创建失败",
+                )?;
+                self.render_mr_progress(
+                    terminal,
+                    3,
+                    total_steps,
+                    &summary,
+                    "跳过自动合并，因创建失败",
+                )?;
+            }
         }
 
         Ok(results)
@@ -3760,50 +3844,172 @@ impl App {
 
     fn execute_mr_batch(
         &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         project_id: u64,
         project_name: &str,
         mappings: &[(String, String)],
         protected_merge_mode: ProtectedMergeMode,
     ) -> Result<Vec<(bool, String)>> {
         let mut results = Vec::new();
-        let mut mr_list: Vec<(u64, String, String)> = Vec::new();
 
         if mappings.is_empty() {
-            return Ok(vec![(false, "未选择任何分支映射".to_string())]);
+            return Ok(vec![(
+                false,
+                "没有可用于批量 MR 的非保护分支映射".to_string(),
+            )]);
         }
 
+        let total_steps = mappings.len() * 3;
+        let mut current_step = 0usize;
+
         for (src, tgt) in mappings {
+            let summary = format!("{src} -> {tgt}");
+
+            current_step += 1;
+            self.render_mr_progress(
+                terminal,
+                current_step,
+                total_steps,
+                &summary,
+                &format!("创建 MR [{project_name}]"),
+            )?;
             match self.gitlab.create_mr(project_id, project_name, src, tgt) {
                 Ok(mr) => {
                     results.push((
                         true,
                         format!("MR 创建成功: {src} -> {tgt} (IID: {})", mr.iid),
                     ));
-                    mr_list.push((mr.iid, src.clone(), tgt.clone()));
+                    current_step += 1;
+                    self.render_mr_progress(
+                        terminal,
+                        current_step,
+                        total_steps,
+                        &summary,
+                        "审批 MR",
+                    )?;
+                    match self.gitlab.approve_mr(project_id, mr.iid) {
+                        Ok(()) => {
+                            results.push((true, format!("审批成功: {src} -> {tgt}")));
+                            current_step += 1;
+                            self.render_mr_progress(
+                                terminal,
+                                current_step,
+                                total_steps,
+                                &summary,
+                                &self.mr_merge_progress_detail(tgt, protected_merge_mode),
+                            )?;
+                            results.extend(self.handle_mr_merge_policy(
+                                project_id,
+                                mr.iid,
+                                src,
+                                tgt,
+                                protected_merge_mode,
+                            ));
+                        }
+                        Err(e) => {
+                            results.push((false, format!("审批失败 {src} -> {tgt}: {e}")));
+                            current_step += 1;
+                            self.render_mr_progress(
+                                terminal,
+                                current_step,
+                                total_steps,
+                                &summary,
+                                "跳过自动合并，因审批失败",
+                            )?;
+                        }
+                    }
                 }
                 Err(e) => {
                     results.push((false, format!("创建 MR 失败 {src} -> {tgt}: {e}")));
+                    current_step += 1;
+                    self.render_mr_progress(
+                        terminal,
+                        current_step,
+                        total_steps,
+                        &summary,
+                        "跳过审批，因创建失败",
+                    )?;
+                    current_step += 1;
+                    self.render_mr_progress(
+                        terminal,
+                        current_step,
+                        total_steps,
+                        &summary,
+                        "跳过自动合并，因创建失败",
+                    )?;
                 }
-            }
-        }
-
-        for (iid, src, tgt) in &mr_list {
-            match self.gitlab.approve_mr(project_id, *iid) {
-                Ok(()) => {
-                    results.push((true, format!("审批成功: {src} -> {tgt}")));
-                    results.extend(self.handle_mr_merge_policy(
-                        project_id,
-                        *iid,
-                        src,
-                        tgt,
-                        protected_merge_mode,
-                    ));
-                }
-                Err(e) => results.push((false, format!("审批失败 {src} -> {tgt}: {e}"))),
             }
         }
 
         Ok(results)
+    }
+
+    fn render_mr_progress(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        current: usize,
+        total: usize,
+        summary: &str,
+        detail: &str,
+    ) -> Result<()> {
+        self.render_execution_progress(
+            terminal,
+            "gmux / MR 执行中",
+            "正在创建、审批并处理 Merge Request",
+            &ProgressUpdate {
+                current,
+                total,
+                summary: summary.to_string(),
+                detail: detail.to_string(),
+            },
+        )
+    }
+
+    fn mr_merge_progress_detail(
+        &self,
+        target_branch: &str,
+        protected_merge_mode: ProtectedMergeMode,
+    ) -> String {
+        if self.is_protected_target(target_branch) {
+            match protected_merge_mode {
+                ProtectedMergeMode::Merge => "合并保护分支 MR".to_string(),
+                ProtectedMergeMode::Skip => "跳过保护分支自动合并".to_string(),
+            }
+        } else {
+            format!(
+                "自动合并 MR，等待 {} 秒并按策略重试",
+                self.config.merge_policy.auto_merge_delay_seconds
+            )
+        }
+    }
+}
+
+fn filter_batch_mr_mappings(
+    mappings: Vec<(String, String)>,
+    protected_targets: &[String],
+) -> Vec<(String, String)> {
+    mappings
+        .into_iter()
+        .filter(|(_, target)| !protected_targets.iter().any(|branch| branch == target))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filter_batch_mr_mappings;
+
+    #[test]
+    fn batch_mr_excludes_protected_targets() {
+        let mappings = vec![
+            ("dev".to_string(), "test".to_string()),
+            ("test".to_string(), "main".to_string()),
+            ("release".to_string(), "prod".to_string()),
+        ];
+        let protected_targets = vec!["main".to_string(), "prod".to_string()];
+
+        let filtered = filter_batch_mr_mappings(mappings, &protected_targets);
+
+        assert_eq!(filtered, vec![("dev".to_string(), "test".to_string())]);
     }
 }
 
