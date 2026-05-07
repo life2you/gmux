@@ -22,6 +22,14 @@ merge_branch_middle = ""
 # 环境分支列表（可选，默认 ["uat", "test", "stage", "pre_prod"]）
 env_branches = ["uat", "test", "stage", "pre_prod"]
 
+[merge_policy]
+# 命中这些目标分支时，gmux 会先询问是否继续自动合并
+protected_targets = ["master", "main"]
+# 非保护目标分支在自动合并前的等待秒数
+auto_merge_delay_seconds = 10
+# 非保护目标分支自动合并失败时的重试次数
+auto_merge_retry_count = 3
+
 # MR 分支映射（可选）
 # 格式：源分支 = "目标分支"
 # 未配置时会根据 env_branches 和 merge_branch_middle 自动生成

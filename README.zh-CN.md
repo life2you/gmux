@@ -66,6 +66,11 @@ root_dirs = ["/Users/you/code", "/Users/you/client-work"]
 merge_branch_middle = "henry"
 env_branches = ["dev", "test", "uat", "stage", "prod"]
 
+[merge_policy]
+protected_targets = ["master", "main"]
+auto_merge_delay_seconds = 10
+auto_merge_retry_count = 3
+
 [branch_map]
 "dev_henry_meger" = "dev"
 "test_henry_meger" = "test"
@@ -78,9 +83,11 @@ env_branches = ["dev", "test", "uat", "stage", "prod"]
 
 - 本地工作流在真正执行前会先显示预览页，包含分支存在性、工作区脏状态、detached HEAD、ahead/behind 等检查。
 - GitLab MR 工作流也会在真正发 API 请求前展示预览。
+- 本地同步和本地合并现在会显示实时进度页，不再只有执行结束后的结果页。
 - 主要选择流程都支持搜索，按 `/` 可以过滤项目或分支列表。
 - 在支持的页面按 `?` 可以直接查看当前页的使用说明。
-- `配置管理` 支持直接修改 `project.root_dirs`、`gitlab.host`、`gitlab.token`、`merge_branch_middle`、`env_branches` 和 `branch_map`，改动会立即自动保存。
+- `配置管理` 支持直接修改 `project.root_dirs`、`gitlab.host`、`gitlab.token`、`merge_branch_middle`、`env_branches`、`branch_map` 和 merge 策略配置，改动会立即自动保存。
+- 保护目标分支在自动合并前会额外确认；非保护目标分支会按配置的等待秒数和重试次数自动合并。
 - 如果多个项目根目录下存在同名仓库，项目选择页会显示来源目录，帮助你选对仓库。
 
 ## Homebrew

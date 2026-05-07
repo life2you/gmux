@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::{thread, time::Duration};
 
 pub struct GitLabClient {
     base_url: String,
@@ -124,21 +125,47 @@ impl GitLabClient {
         }
 
         let result: serde_json::Value = resp.json().context("解析合并响应失败")?;
-        let state = result["state"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let state = result["state"].as_str().unwrap_or("unknown").to_string();
         Ok(state)
     }
 
-    pub fn approve_and_merge(&self, project_id: u64, mr_iid: u64) -> Result<()> {
-        self.approve_mr(project_id, mr_iid)?;
-        let state = self.merge_mr(project_id, mr_iid)?;
-        if state == "merged" {
-            Ok(())
-        } else {
-            bail!("MR 合并状态异常: {state}");
+    pub fn merge_mr_with_retry(
+        &self,
+        project_id: u64,
+        mr_iid: u64,
+        delay_seconds: u64,
+        retry_count: u32,
+    ) -> Result<Vec<String>> {
+        let mut logs = Vec::new();
+        let total_attempts = retry_count.saturating_add(1);
+
+        for attempt in 1..=total_attempts {
+            if delay_seconds > 0 {
+                logs.push(format!("第 {attempt} 次合并前等待 {delay_seconds} 秒"));
+                thread::sleep(Duration::from_secs(delay_seconds));
+            }
+
+            match self.merge_mr(project_id, mr_iid) {
+                Ok(state) if state == "merged" => {
+                    logs.push(format!("第 {attempt} 次合并成功"));
+                    return Ok(logs);
+                }
+                Ok(state) => {
+                    logs.push(format!("第 {attempt} 次合并返回状态: {state}"));
+                    if attempt == total_attempts {
+                        bail!("MR 合并状态异常: {state}");
+                    }
+                }
+                Err(err) => {
+                    logs.push(format!("第 {attempt} 次合并失败: {err}"));
+                    if attempt == total_attempts {
+                        return Err(err);
+                    }
+                }
+            }
         }
+
+        bail!("MR 合并流程异常结束")
     }
 }
 

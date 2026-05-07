@@ -66,6 +66,11 @@ root_dirs = ["/Users/you/code", "/Users/you/client-work"]
 merge_branch_middle = "henry"
 env_branches = ["dev", "test", "uat", "stage", "prod"]
 
+[merge_policy]
+protected_targets = ["master", "main"]
+auto_merge_delay_seconds = 10
+auto_merge_retry_count = 3
+
 [branch_map]
 "dev_henry_meger" = "dev"
 "test_henry_meger" = "test"
@@ -78,9 +83,11 @@ env_branches = ["dev", "test", "uat", "stage", "prod"]
 
 - Local workflows now include preview pages with branch existence, dirty working tree, detached HEAD, and ahead/behind checks before execution.
 - GitLab MR workflows also show a preview before sending API requests.
+- Local sync and merge execution now show a live progress page instead of only a final result dump.
 - Search is available in the main selection flows. Press `/` to filter large project or branch lists.
 - Press `?` on supported screens to see contextual usage help inside the app.
-- `Config Management` lets you edit `project.root_dirs`, `gitlab.host`, `gitlab.token`, `merge_branch_middle`, `env_branches`, and `branch_map` with immediate auto-save.
+- `Config Management` lets you edit `project.root_dirs`, `gitlab.host`, `gitlab.token`, `merge_branch_middle`, `env_branches`, `branch_map`, and merge policy settings with immediate auto-save.
+- Protected target branches require an extra confirmation before auto-merge; non-protected targets wait and retry automatically based on config.
 - If multiple roots contain repositories with the same name, the project picker shows the source root to help you choose the right repo.
 
 ## Homebrew

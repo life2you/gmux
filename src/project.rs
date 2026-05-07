@@ -70,10 +70,7 @@ pub fn scan_projects(root_dirs: &[String]) -> Result<Vec<Project>> {
     }
 
     if projects.is_empty() {
-        bail!(
-            "在这些目录中未找到任何 Git 仓库: {}",
-            root_dirs.join(" | ")
-        );
+        bail!("在这些目录中未找到任何 Git 仓库: {}", root_dirs.join(" | "));
     }
 
     Ok(projects)
@@ -87,13 +84,37 @@ pub struct BranchOpResult {
     pub message: String,
 }
 
-pub fn sync_and_push(project: &Project, config: &Config) -> Vec<BranchOpResult> {
+#[derive(Debug, Clone)]
+pub struct ProgressUpdate {
+    pub current: usize,
+    pub total: usize,
+    pub summary: String,
+    pub detail: String,
+}
+
+pub fn sync_and_push_with_progress<F>(
+    project: &Project,
+    config: &Config,
+    mut on_progress: F,
+) -> Vec<BranchOpResult>
+where
+    F: FnMut(&ProgressUpdate),
+{
     let mut results = Vec::new();
+    let total_steps = config.project.env_branches.len() * 2;
+    let mut current_step = 0usize;
 
     for env_branch in &config.project.env_branches {
         let merge_branch = config.get_merge_branch_name(env_branch, &project.name);
 
-        // Step 1: update env branch
+        current_step += 1;
+        on_progress(&ProgressUpdate {
+            current: current_step,
+            total: total_steps,
+            summary: format!("{env_branch} -> {merge_branch}"),
+            detail: format!("更新环境分支 `{env_branch}`"),
+        });
+
         let update_result = update_branch(&project.path, env_branch);
         if let Err(e) = update_result {
             results.push(BranchOpResult {
@@ -105,7 +126,14 @@ pub fn sync_and_push(project: &Project, config: &Config) -> Vec<BranchOpResult> 
             continue;
         }
 
-        // Step 2: sync to merge branch and push
+        current_step += 1;
+        on_progress(&ProgressUpdate {
+            current: current_step,
+            total: total_steps,
+            summary: format!("{env_branch} -> {merge_branch}"),
+            detail: format!("同步并推送合并分支 `{merge_branch}`"),
+        });
+
         match sync_to_merge_branch(&project.path, env_branch, &merge_branch) {
             Ok(msg) => {
                 results.push(BranchOpResult {
@@ -164,14 +192,27 @@ fn sync_to_merge_branch(repo_path: &Path, source: &str, merge_branch: &str) -> R
     }
 }
 
-pub fn merge_to_targets(
+pub fn merge_to_targets_with_progress<F>(
     project: &Project,
     source_branch: &str,
     targets: &[String],
-) -> Vec<BranchOpResult> {
+    mut on_progress: F,
+) -> Vec<BranchOpResult>
+where
+    F: FnMut(&ProgressUpdate),
+{
     let mut results = Vec::new();
+    let total_steps = targets.len();
+    let mut current_step = 0usize;
 
     for target in targets {
+        current_step += 1;
+        on_progress(&ProgressUpdate {
+            current: current_step,
+            total: total_steps,
+            summary: format!("{source_branch} -> {target}"),
+            detail: format!("合并并推送目标分支 `{target}`"),
+        });
         match sync_to_merge_branch(&project.path, source_branch, target) {
             Ok(msg) => {
                 results.push(BranchOpResult {
@@ -229,11 +270,8 @@ mod tests {
         std::fs::create_dir_all(alpha.join(".git")).expect("alpha .git should exist");
         std::fs::create_dir_all(beta.join(".git")).expect("beta .git should exist");
 
-        let projects = scan_projects(&[
-            root_a.display().to_string(),
-            root_b.display().to_string(),
-        ])
-        .expect("scan should succeed");
+        let projects = scan_projects(&[root_a.display().to_string(), root_b.display().to_string()])
+            .expect("scan should succeed");
 
         assert_eq!(projects.len(), 2);
         assert_eq!(projects[0].name, "alpha");
