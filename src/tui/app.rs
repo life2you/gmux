@@ -3148,11 +3148,13 @@ impl App {
                     format!("计划创建 MR 数量: {}", mappings.len()),
                     String::new(),
                     "即将执行以下步骤:".to_string(),
+                    "- 先按映射顺序创建全部 MR".to_string(),
+                    "- 再对创建成功的 MR 统一自动审批".to_string(),
                 ];
                 for (src, tgt) in mappings {
                     lines.push(format!("- 创建 MR: `{src}` -> `{tgt}`"));
                 }
-                lines.push("- 对创建成功的 MR 继续自动审批".to_string());
+                lines.push("- 最后对审批成功的 MR 继续自动合并".to_string());
                 let protected_targets: Vec<String> = mappings
                     .iter()
                     .map(|(_, tgt)| tgt)
@@ -3315,7 +3317,7 @@ impl App {
                 "如果自动审批或自动合并失败，结果页会单独显示失败阶段。".to_string(),
             ],
             ExecutionPlan::MrBatch { .. } => vec![
-                "批量 MR 会依次创建多组 MR，再对创建成功的 MR 自动审批。".to_string(),
+                "批量 MR 会先创建全部 MR，再统一审批，最后再进入自动合并阶段。".to_string(),
                 "普通目标分支会按“等待秒数 + 重试次数”自动合并；保护目标分支会先再次确认。"
                     .to_string(),
                 "如果其中某组失败，不会阻止其它组继续执行。".to_string(),
@@ -3861,6 +3863,8 @@ impl App {
 
         let total_steps = mappings.len() * 3;
         let mut current_step = 0usize;
+        let mut created_mrs: Vec<(String, String, Option<u64>)> = Vec::new();
+        let mut approved_mrs: Vec<(String, String, Option<u64>, bool)> = Vec::new();
 
         for (src, tgt) in mappings {
             let summary = format!("{src} -> {tgt}");
@@ -3879,65 +3883,64 @@ impl App {
                         true,
                         format!("MR 创建成功: {src} -> {tgt} (IID: {})", mr.iid),
                     ));
-                    current_step += 1;
-                    self.render_mr_progress(
-                        terminal,
-                        current_step,
-                        total_steps,
-                        &summary,
-                        "审批 MR",
-                    )?;
-                    match self.gitlab.approve_mr(project_id, mr.iid) {
-                        Ok(()) => {
-                            results.push((true, format!("审批成功: {src} -> {tgt}")));
-                            current_step += 1;
-                            self.render_mr_progress(
-                                terminal,
-                                current_step,
-                                total_steps,
-                                &summary,
-                                &self.mr_merge_progress_detail(tgt, protected_merge_mode),
-                            )?;
-                            results.extend(self.handle_mr_merge_policy(
-                                project_id,
-                                mr.iid,
-                                src,
-                                tgt,
-                                protected_merge_mode,
-                            ));
-                        }
-                        Err(e) => {
-                            results.push((false, format!("审批失败 {src} -> {tgt}: {e}")));
-                            current_step += 1;
-                            self.render_mr_progress(
-                                terminal,
-                                current_step,
-                                total_steps,
-                                &summary,
-                                "跳过自动合并，因审批失败",
-                            )?;
-                        }
-                    }
+                    created_mrs.push((src.clone(), tgt.clone(), Some(mr.iid)));
                 }
                 Err(e) => {
                     results.push((false, format!("创建 MR 失败 {src} -> {tgt}: {e}")));
-                    current_step += 1;
-                    self.render_mr_progress(
-                        terminal,
-                        current_step,
-                        total_steps,
-                        &summary,
-                        "跳过审批，因创建失败",
-                    )?;
-                    current_step += 1;
-                    self.render_mr_progress(
-                        terminal,
-                        current_step,
-                        total_steps,
-                        &summary,
-                        "跳过自动合并，因创建失败",
-                    )?;
+                    created_mrs.push((src.clone(), tgt.clone(), None));
                 }
+            }
+        }
+
+        for (src, tgt, mr_iid) in &created_mrs {
+            let summary = format!("{src} -> {tgt}");
+            current_step += 1;
+            self.render_mr_progress(
+                terminal,
+                current_step,
+                total_steps,
+                &summary,
+                if mr_iid.is_some() {
+                    "审批 MR"
+                } else {
+                    "跳过审批，因创建失败"
+                },
+            )?;
+
+            if let Some(iid) = mr_iid {
+                match self.gitlab.approve_mr(project_id, *iid) {
+                    Ok(()) => {
+                        results.push((true, format!("审批成功: {src} -> {tgt}")));
+                        approved_mrs.push((src.clone(), tgt.clone(), Some(*iid), true));
+                    }
+                    Err(e) => {
+                        results.push((false, format!("审批失败 {src} -> {tgt}: {e}")));
+                        approved_mrs.push((src.clone(), tgt.clone(), Some(*iid), false));
+                    }
+                }
+            } else {
+                approved_mrs.push((src.clone(), tgt.clone(), None, false));
+            }
+        }
+
+        for (src, tgt, mr_iid, approved) in &approved_mrs {
+            let summary = format!("{src} -> {tgt}");
+            current_step += 1;
+            let detail = match (mr_iid, approved) {
+                (None, _) => "跳过自动合并，因创建失败".to_string(),
+                (Some(_), false) => "跳过自动合并，因审批失败".to_string(),
+                (Some(_), true) => self.mr_merge_progress_detail(tgt, protected_merge_mode),
+            };
+            self.render_mr_progress(terminal, current_step, total_steps, &summary, &detail)?;
+
+            if let (Some(iid), true) = (mr_iid, approved) {
+                results.extend(self.handle_mr_merge_policy(
+                    project_id,
+                    *iid,
+                    src,
+                    tgt,
+                    protected_merge_mode,
+                ));
             }
         }
 
