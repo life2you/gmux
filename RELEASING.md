@@ -2,14 +2,14 @@
 
 # Releasing `gmux`
 
-This document is the maintainer SOP for publishing a new `gmux` release and updating Homebrew.
+This document is the maintainer SOP for publishing a new `gmux` release with prebuilt macOS binaries and updating Homebrew.
 
 ## Preconditions
 
 - Working tree is clean
-- `cargo build` passes
+- `cargo check` passes
 - `cargo test` passes
-- `Cargo.toml` version is already bumped to the target release version
+- `Cargo.toml` and `Cargo.lock` already contain the target version
 - You are on the exact commit that should be tagged
 
 ## Release Steps
@@ -19,27 +19,36 @@ Assume the target version is `<version>`.
 1. Verify the release commit locally:
 
 ```bash
-cargo build
+cargo check
 cargo test
 git status --short
 ```
 
-2. Create and push the release commit if needed:
+2. Commit and push the release changes if needed:
 
 ```bash
-git add Cargo.toml Cargo.lock README.md README.zh-CN.md RELEASING.md RELEASING.zh-CN.md src packaging scripts
+git add Cargo.toml Cargo.lock README.md README.zh-CN.md RELEASING.md RELEASING.zh-CN.md src .github packaging scripts
 git commit -m "release: v<version>"
 git push origin main
 ```
 
-3. Tag the exact release commit:
+3. Create and push the release tag:
 
 ```bash
 git tag -a v<version> -m "v<version>"
 git push origin v<version>
 ```
 
-4. Regenerate the packaged Homebrew formula:
+4. Wait for the GitHub Actions `release` workflow to finish for that tag.
+
+The workflow should publish these assets to the GitHub Release:
+
+- `gmux-aarch64-apple-darwin.tar.gz`
+- `gmux-x86_64-apple-darwin.tar.gz`
+
+If the workflow did not run automatically, trigger it manually with tag `v<version>`.
+
+5. Regenerate the packaged Homebrew formula:
 
 ```bash
 ./scripts/update-homebrew-formula.sh <version>
@@ -51,22 +60,23 @@ The script validates:
 - tag source version matches `Cargo.toml`
 - remote tag exists
 - remote tag matches local tag
+- both prebuilt release assets are already downloadable
 
-5. Refresh the scaffolded formula committed in this repo:
+6. Commit the refreshed formula template in this repository:
 
 ```bash
-git add packaging/homebrew-tap/Formula/gmux.rb packaging/homebrew-tap/README.md packaging/homebrew-tap/README.zh-CN.md scripts/update-homebrew-formula.sh
+git add packaging/homebrew-tap/Formula/gmux.rb scripts/update-homebrew-formula.sh .github/workflows/release.yml
 git commit -m "chore: refresh packaged Homebrew formula"
 git push origin main
 ```
 
-6. Copy the formula into the tap repository:
+7. Copy the formula into the tap repository:
 
 ```bash
 cp packaging/homebrew-tap/Formula/gmux.rb ../homebrew-tap/Formula/gmux.rb
 ```
 
-7. Publish the tap update:
+8. Publish the tap update:
 
 ```bash
 cd ../homebrew-tap
@@ -75,17 +85,17 @@ git commit -m "Update gmux formula for v<version>"
 git push origin main
 ```
 
-8. Verify the published install path:
+9. Verify the published install path:
 
 ```bash
 brew update
 brew upgrade gmux
 gmux --version
-brew info gmux
+brew info life2you/tap/gmux
 ```
 
 ## Important Notes
 
-- Do not generate the Homebrew formula before pushing the tag.
+- Do not update the tap formula before the release assets exist.
 - Do not move or reuse an old tag for a new release.
-- The formula uses `std_cargo_args(path: ".")`, so keep `Cargo.lock` committed and up to date for reproducible installs.
+- The Homebrew formula now installs prebuilt binaries, so users no longer need Rust on their machines.

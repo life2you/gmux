@@ -107,6 +107,11 @@ Recommended release flow:
 git tag -a v<version> -m "v<version>"
 git push origin main
 git push origin v<version>
+```
+
+Then wait for the GitHub Actions `release` workflow to publish prebuilt macOS assets, and run:
+
+```bash
 ./scripts/update-homebrew-formula.sh <version>
 ```
 

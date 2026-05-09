@@ -1,14 +1,23 @@
 class Gmux < Formula
   desc "Terminal Git workflow tool for multi-env branch sync and GitLab MR automation"
   homepage "https://github.com/life2you/gmux"
-  url "https://github.com/life2you/gmux/archive/refs/tags/v0.1.6.tar.gz"
-  sha256 "4d11395dd91750515c4e9042f5d5bd02b82076e4439f2caf42612e197e04a69e"
+  version "0.1.6"
   license "MIT"
 
-  depends_on "rust" => :build
+  on_macos do
+    on_arm do
+      url "https://github.com/life2you/gmux/releases/download/v0.1.6/gmux-aarch64-apple-darwin.tar.gz"
+      sha256 "REPLACE_WITH_ARM64_SHA256"
+    end
+
+    on_intel do
+      url "https://github.com/life2you/gmux/releases/download/v0.1.6/gmux-x86_64-apple-darwin.tar.gz"
+      sha256 "REPLACE_WITH_X64_SHA256"
+    end
+  end
 
   def install
-    system "cargo", "install", *std_cargo_args(path: ".")
+    bin.install "gmux"
   end
 
   test do

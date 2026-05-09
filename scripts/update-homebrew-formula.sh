@@ -7,6 +7,11 @@ DEFAULT_FORMULA_PATH="$REPO_ROOT/packaging/homebrew-tap/Formula/gmux.rb"
 
 OWNER="${OWNER:-life2you}"
 REPO="${REPO:-gmux}"
+HOMEPAGE="${HOMEPAGE:-https://github.com/$OWNER/$REPO}"
+FORMULA_CLASS="${FORMULA_CLASS:-Gmux}"
+BINARY_NAME="${BINARY_NAME:-gmux}"
+ASSET_BASENAME="${ASSET_BASENAME:-gmux}"
+DESCRIPTION="${DESCRIPTION:-Terminal Git workflow tool for multi-env branch sync and GitLab MR automation}"
 VERSION=""
 FORMULA_PATH="$DEFAULT_FORMULA_PATH"
 DRY_RUN=0
@@ -98,7 +103,6 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 TAG="v$VERSION"
-URL="https://github.com/$OWNER/$REPO/archive/refs/tags/$TAG.tar.gz"
 LOCAL_TAG_COMMIT="$(git -C "$REPO_ROOT" rev-parse "$TAG^{}" 2>/dev/null || true)"
 
 if [[ -z "$LOCAL_TAG_COMMIT" ]]; then
@@ -134,28 +138,46 @@ if [[ "$REMOTE_TAG_COMMIT" != "$LOCAL_TAG_COMMIT" ]]; then
   exit 1
 fi
 
-SHA256="$(
-  curl --fail --silent --show-error --location --retry 3 "$URL" |
+ARM_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/${ASSET_BASENAME}-aarch64-apple-darwin.tar.gz"
+INTEL_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/${ASSET_BASENAME}-x86_64-apple-darwin.tar.gz"
+
+ARM_SHA256="$(
+  curl --fail --silent --show-error --location --retry 3 "$ARM_URL" |
+    shasum -a 256 |
+    awk '{print $1}'
+)"
+
+INTEL_SHA256="$(
+  curl --fail --silent --show-error --location --retry 3 "$INTEL_URL" |
     shasum -a 256 |
     awk '{print $1}'
 )"
 
 FORMULA_CONTENT="$(cat <<EOF
-class Gmux < Formula
-  desc "Terminal Git workflow tool for multi-env branch sync and GitLab MR automation"
-  homepage "https://github.com/$OWNER/$REPO"
-  url "$URL"
-  sha256 "$SHA256"
+class $FORMULA_CLASS < Formula
+  desc "$DESCRIPTION"
+  homepage "$HOMEPAGE"
+  version "$VERSION"
   license "MIT"
 
-  depends_on "rust" => :build
+  on_macos do
+    on_arm do
+      url "$ARM_URL"
+      sha256 "$ARM_SHA256"
+    end
+
+    on_intel do
+      url "$INTEL_URL"
+      sha256 "$INTEL_SHA256"
+    end
+  end
 
   def install
-    system "cargo", "install", *std_cargo_args(path: ".")
+    bin.install "$BINARY_NAME"
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/gmux --version")
+    assert_match version.to_s, shell_output("#{bin}/$BINARY_NAME --version")
   end
 end
 EOF
@@ -165,9 +187,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
   printf '%s\n' "$FORMULA_CONTENT"
   {
     echo "Dry run only."
-    echo "Version: $VERSION"
-    echo "SHA256:  $SHA256"
-    echo "Output:  $FORMULA_PATH"
+    echo "Version:      $VERSION"
+    echo "ARM SHA256:   $ARM_SHA256"
+    echo "Intel SHA256: $INTEL_SHA256"
+    echo "Output:       $FORMULA_PATH"
   } >&2
   exit 0
 fi
@@ -184,5 +207,6 @@ printf '%s\n' "$FORMULA_CONTENT" > "$TMP_FORMULA_PATH"
 mv "$TMP_FORMULA_PATH" "$FORMULA_PATH"
 
 echo "Updated $FORMULA_PATH"
-echo "Version: $VERSION"
-echo "SHA256:  $SHA256"
+echo "Version:      $VERSION"
+echo "ARM SHA256:   $ARM_SHA256"
+echo "Intel SHA256: $INTEL_SHA256"

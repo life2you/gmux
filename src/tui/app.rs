@@ -3011,36 +3011,18 @@ impl App {
             };
         }
 
-        let mut lines = vec![(
-            true,
-            format!(
-                "普通分支自动合并策略: 等待 {} 秒，失败最多重试 {} 次",
-                self.config.merge_policy.auto_merge_delay_seconds,
-                self.config.merge_policy.auto_merge_retry_count
-            ),
-        )];
         match self.gitlab.merge_mr_with_retry(
             project_id,
             mr_iid,
             self.config.merge_policy.auto_merge_delay_seconds,
             self.config.merge_policy.auto_merge_retry_count,
         ) {
-            Ok(logs) => {
-                lines.extend(logs.into_iter().map(|line| {
-                    (
-                        !line.contains("失败") && !line.contains("异常"),
-                        format!("{source_branch} -> {target_branch}: {line}"),
-                    )
-                }));
-            }
-            Err(err) => {
-                lines.push((
-                    false,
-                    format!("自动合并失败 {source_branch} -> {target_branch}: {err}"),
-                ));
-            }
+            Ok(logs) => summarize_auto_merge_logs(source_branch, target_branch, &logs),
+            Err(err) => vec![(
+                false,
+                format!("自动合并失败 {source_branch} -> {target_branch}: {err}"),
+            )],
         }
-        lines
     }
 
     fn build_execution_preview(&self, plan: &ExecutionPlan) -> (String, String, Vec<String>) {
@@ -3997,9 +3979,34 @@ fn filter_batch_mr_mappings(
         .collect()
 }
 
+fn summarize_auto_merge_logs(
+    source_branch: &str,
+    target_branch: &str,
+    logs: &[String],
+) -> Vec<(bool, String)> {
+    let attempt = logs
+        .iter()
+        .rev()
+        .find_map(|line| parse_merge_attempt(line, "次合并成功"))
+        .unwrap_or(1);
+
+    let message = if attempt <= 1 {
+        format!("自动合并成功: {source_branch} -> {target_branch}")
+    } else {
+        format!("自动合并成功: {source_branch} -> {target_branch}（第 {attempt} 次尝试）")
+    };
+
+    vec![(true, message)]
+}
+
+fn parse_merge_attempt(line: &str, suffix: &str) -> Option<u32> {
+    let number = line.strip_prefix("第 ")?.strip_suffix(suffix)?.trim();
+    number.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::filter_batch_mr_mappings;
+    use super::{filter_batch_mr_mappings, parse_merge_attempt, summarize_auto_merge_logs};
 
     #[test]
     fn batch_mr_excludes_protected_targets() {
@@ -4013,6 +4020,46 @@ mod tests {
         let filtered = filter_batch_mr_mappings(mappings, &protected_targets);
 
         assert_eq!(filtered, vec![("dev".to_string(), "test".to_string())]);
+    }
+
+    #[test]
+    fn summarize_auto_merge_logs_collapses_first_try_success() {
+        let logs = vec![
+            "第 1 次合并前等待 10 秒".to_string(),
+            "第 1 次合并成功".to_string(),
+        ];
+
+        let summary = summarize_auto_merge_logs("dev", "test", &logs);
+
+        assert_eq!(
+            summary,
+            vec![(true, "自动合并成功: dev -> test".to_string())]
+        );
+    }
+
+    #[test]
+    fn summarize_auto_merge_logs_mentions_retry_attempt() {
+        let logs = vec![
+            "第 1 次合并前等待 10 秒".to_string(),
+            "第 1 次合并失败: merge request cannot be merged".to_string(),
+            "第 2 次合并前等待 10 秒".to_string(),
+            "第 2 次合并成功".to_string(),
+        ];
+
+        let summary = summarize_auto_merge_logs("dev", "test", &logs);
+
+        assert_eq!(
+            summary,
+            vec![(true, "自动合并成功: dev -> test（第 2 次尝试）".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_merge_attempt_reads_success_line() {
+        assert_eq!(
+            parse_merge_attempt("第 3 次合并成功", "次合并成功"),
+            Some(3)
+        );
     }
 }
 
