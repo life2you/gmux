@@ -15,12 +15,40 @@ pub struct GitLabProject {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct GitLabUser {
+    pub name: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct MergeRequest {
     pub id: u64,
     pub iid: u64,
+    pub title: String,
     pub web_url: String,
     pub state: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub author: GitLabUser,
+    #[serde(default)]
+    pub approved_by_me: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabCurrentUser {
+    username: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeRequestApprovals {
+    #[serde(default)]
+    approved_by: Vec<ApprovedByEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovedByEntry {
+    user: GitLabUser,
 }
 
 impl GitLabClient {
@@ -84,6 +112,38 @@ impl GitLabClient {
         Ok(mr)
     }
 
+    pub fn list_open_merge_requests(&self, project_id: u64) -> Result<Vec<MergeRequest>> {
+        let resp = self
+            .client
+            .get(self.api_url(&format!(
+                "/projects/{project_id}/merge_requests?state=opened&scope=all&per_page=100"
+            )))
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .context("请求 MR 列表失败")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            bail!("读取 MR 列表失败 (HTTP {status}): {text}");
+        }
+
+        let mut merge_requests: Vec<MergeRequest> = resp.json().context("解析 MR 列表响应失败")?;
+        let current_username = self.current_username()?;
+
+        for mr in &mut merge_requests {
+            mr.approved_by_me =
+                self.is_mr_approved_by_user(project_id, mr.iid, &current_username)?;
+        }
+
+        Ok(merge_requests)
+    }
+
+    pub fn is_mr_approved_by_current_user(&self, project_id: u64, mr_iid: u64) -> Result<bool> {
+        let current_username = self.current_username()?;
+        self.is_mr_approved_by_user(project_id, mr_iid, &current_username)
+    }
+
     pub fn approve_mr(&self, project_id: u64, mr_iid: u64) -> Result<()> {
         let resp = self
             .client
@@ -98,6 +158,28 @@ impl GitLabClient {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
             bail!("审批 MR 失败 (HTTP {status}): {text}");
+        }
+
+        Ok(())
+    }
+
+    pub fn close_mr(&self, project_id: u64, mr_iid: u64) -> Result<()> {
+        let body = serde_json::json!({
+            "state_event": "close"
+        });
+
+        let resp = self
+            .client
+            .put(self.api_url(&format!("/projects/{project_id}/merge_requests/{mr_iid}")))
+            .header("PRIVATE-TOKEN", &self.token)
+            .json(&body)
+            .send()
+            .context("关闭 MR 请求失败")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            bail!("关闭 MR 失败 (HTTP {status}): {text}");
         }
 
         Ok(())
@@ -166,6 +248,47 @@ impl GitLabClient {
         }
 
         bail!("MR 合并流程异常结束")
+    }
+
+    fn current_username(&self) -> Result<String> {
+        let resp = self
+            .client
+            .get(self.api_url("/user"))
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .context("请求当前 GitLab 用户失败")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            bail!("读取当前 GitLab 用户失败 (HTTP {status}): {text}");
+        }
+
+        let user: GitLabCurrentUser = resp.json().context("解析当前 GitLab 用户响应失败")?;
+        Ok(user.username)
+    }
+
+    fn is_mr_approved_by_user(&self, project_id: u64, mr_iid: u64, username: &str) -> Result<bool> {
+        let resp = self
+            .client
+            .get(self.api_url(&format!(
+                "/projects/{project_id}/merge_requests/{mr_iid}/approvals"
+            )))
+            .header("PRIVATE-TOKEN", &self.token)
+            .send()
+            .context("请求 MR 审批状态失败")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            bail!("读取 MR 审批状态失败 (HTTP {status}): {text}");
+        }
+
+        let approvals: MergeRequestApprovals = resp.json().context("解析 MR 审批状态响应失败")?;
+        Ok(approvals
+            .approved_by
+            .iter()
+            .any(|entry| entry.user.username == username))
     }
 }
 

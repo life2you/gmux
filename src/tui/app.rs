@@ -10,7 +10,7 @@ use std::process::Command;
 
 use crate::config::Config;
 use crate::git;
-use crate::gitlab::GitLabClient;
+use crate::gitlab::{GitLabClient, MergeRequest};
 use crate::project::{self, ProgressUpdate, Project};
 use crate::tui::checklist::{ChecklistAction, ChecklistState};
 use crate::tui::input::{InputAction, InputState};
@@ -121,6 +121,15 @@ enum Page {
     GitLabProjectSelect {
         mr_mode: MrMode,
     },
+    GitLabMrList {
+        project_id: u64,
+        project_name: String,
+    },
+    GitLabMrActions {
+        project_id: u64,
+        project_name: String,
+        mr: MergeRequest,
+    },
     BranchMapSelect {
         project_id: u64,
         project_name: String,
@@ -146,6 +155,7 @@ enum MrMode {
     Single,
     Batch,
     BatchCustom,
+    ListOpen,
 }
 
 #[derive(Clone, Copy)]
@@ -1222,6 +1232,11 @@ impl App {
                                 mr_mode: MrMode::BatchCustom,
                             });
                         }
+                        Some(MrMenuAction::ListOpen) => {
+                            page_stack.push(Page::GitLabProjectSelect {
+                                mr_mode: MrMode::ListOpen,
+                            });
+                        }
                         Some(MrMenuAction::Back) => {
                             page_stack.pop();
                         }
@@ -1284,6 +1299,12 @@ impl App {
                                         mappings,
                                     });
                                 }
+                            }
+                            MrMode::ListOpen => {
+                                page_stack.push(Page::GitLabMrList {
+                                    project_id: id,
+                                    project_name: name,
+                                });
                             }
                         },
                         Some(GitLabAction::Back) => {
@@ -1349,6 +1370,74 @@ impl App {
                         None => {}
                     }
                 }
+                Page::GitLabMrList {
+                    project_id,
+                    project_name,
+                } => {
+                    let pid = *project_id;
+                    let pname = project_name.clone();
+                    let action = match self.show_gitlab_open_mr_list(terminal, pid, &pname) {
+                        Ok(action) => action,
+                        Err(err) => {
+                            page_stack.push(Page::ExecuteResult {
+                                lines: vec![(false, format!("加载待合并 MR 列表失败: {err:#}"))],
+                            });
+                            continue;
+                        }
+                    };
+                    match action {
+                        Some(GitLabMrListAction::Select(mr)) => {
+                            page_stack.push(Page::GitLabMrActions {
+                                project_id: pid,
+                                project_name: pname,
+                                mr,
+                            });
+                        }
+                        Some(GitLabMrListAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(GitLabMrListAction::Quit) => break,
+                        None => {}
+                    }
+                }
+                Page::GitLabMrActions {
+                    project_id,
+                    project_name,
+                    mr,
+                } => {
+                    let pid = *project_id;
+                    let pname = project_name.clone();
+                    let current_mr = mr.clone();
+                    let action = self.show_gitlab_mr_actions(terminal, &pname, &current_mr)?;
+                    match action {
+                        Some(GitLabMrAction::ApproveAndMerge) => {
+                            let results = self.execute_existing_mr_approve_and_merge(
+                                terminal,
+                                pid,
+                                &current_mr,
+                            )?;
+                            if results.iter().all(|(ok, _)| *ok) {
+                                page_stack.pop();
+                            } else {
+                                page_stack.push(Page::ExecuteResult { lines: results });
+                            }
+                        }
+                        Some(GitLabMrAction::Close) => {
+                            let results =
+                                self.execute_existing_mr_close(terminal, pid, &current_mr)?;
+                            if results.iter().all(|(ok, _)| *ok) {
+                                page_stack.pop();
+                            } else {
+                                page_stack.push(Page::ExecuteResult { lines: results });
+                            }
+                        }
+                        Some(GitLabMrAction::Back) => {
+                            page_stack.pop();
+                        }
+                        Some(GitLabMrAction::Quit) => break,
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -1363,13 +1452,13 @@ impl App {
     ) -> Result<Option<MainMenuAction>> {
         let items = vec![
             "本地分支同步 / 合并（含推送）".to_string(),
-            "GitLab MR 创建".to_string(),
+            "GitLab MR 管理".to_string(),
             "配置管理".to_string(),
             "退出程序".to_string(),
         ];
         let details = vec![
             vec!["适合处理本地项目的环境分支同步、批量合并、单分支合并和推送。".to_string()],
-            vec!["适合直接创建单个或批量 Merge Request，并支持后续审批合并。".to_string()],
+            vec!["适合处理 Merge Request 的创建、批量处理与待合并列表查看。".to_string()],
             vec![
                 "在 TUI 里直接修改分支相关配置，改动会自动写回 ~/.config/gmux/gmux.toml。"
                     .to_string(),
@@ -1381,7 +1470,7 @@ impl App {
             .with_details(details)
             .with_help(vec![
                 "本地分支同步 / 合并：用于本地仓库的环境分支同步、批量 merge 和 push。".to_string(),
-                "GitLab MR 创建：用于创建单个或批量 Merge Request，并在成功后自动尝试审批与合并。"
+                "GitLab MR 管理：用于处理 Merge Request 的创建、批量处理、审批合并与待合并列表查看。"
                     .to_string(),
                 "配置管理：可以直接在界面里调整 merge_branch_middle、env_branches 和 branch_map，改动会自动保存。".to_string(),
                 "按 Enter 进入当前选中的功能，按 b 或 Esc 返回，按 q 退出程序。".to_string(),
@@ -2763,6 +2852,7 @@ impl App {
             "单个创建".to_string(),
             format!("批量创建（{} 组可用映射）", batch_mappings.len()),
             "自定义选择多组映射".to_string(),
+            "查看待合并列表".to_string(),
             "返回主菜单".to_string(),
         ];
         let details = vec![
@@ -2775,16 +2865,18 @@ impl App {
                 "从非保护目标分支的映射中手动勾选部分项，适合只处理部分环境或临时链路。"
                     .to_string(),
             ],
+            vec!["查看当前项目里仍处于 opened 状态、待处理的合并请求。".to_string()],
             vec!["不执行 MR 操作。".to_string()],
         ];
 
-        let mut menu = MenuState::new("gmux / MR 模式", "选择 MR 处理方式", items)
+        let mut menu = MenuState::new("gmux / MR 管理", "选择 MR 处理方式", items)
             .with_details(details)
             .with_help(vec![
                 "单个创建：手动选一组源/目标分支映射创建 MR。".to_string(),
                 "批量创建：只处理目标分支不在保护列表里的映射，并对成功的 MR 自动尝试审批与合并。"
                     .to_string(),
                 "自定义多选：只会展示非保护目标分支的映射，适合非标准发布链路。".to_string(),
+                "待合并列表：按项目查看当前仍处于 opened 状态的 MR，并支持搜索。".to_string(),
             ]);
 
         loop {
@@ -2794,9 +2886,133 @@ impl App {
                     MenuAction::Select(0) => Some(MrMenuAction::Single),
                     MenuAction::Select(1) => Some(MrMenuAction::Batch),
                     MenuAction::Select(2) => Some(MrMenuAction::BatchCustom),
-                    MenuAction::Select(3) => Some(MrMenuAction::Back),
+                    MenuAction::Select(3) => Some(MrMenuAction::ListOpen),
+                    MenuAction::Select(4) => Some(MrMenuAction::Back),
                     MenuAction::Back => Some(MrMenuAction::Back),
                     MenuAction::Quit => Some(MrMenuAction::Quit),
+                    _ => None,
+                });
+            }
+        }
+    }
+
+    fn show_gitlab_open_mr_list(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_id: u64,
+        project_name: &str,
+    ) -> Result<Option<GitLabMrListAction>> {
+        terminal.draw(|f| {
+            let area = f.area();
+            let p = ratatui::widgets::Paragraph::new("  正在加载待合并 MR 列表...");
+            f.render_widget(p, area);
+        })?;
+
+        let merge_requests = self.gitlab.list_open_merge_requests(project_id)?;
+
+        if merge_requests.is_empty() {
+            return Ok(Some(GitLabMrListAction::Back));
+        }
+
+        let items: Vec<String> = merge_requests
+            .iter()
+            .map(|mr| {
+                format!(
+                    "!{}  [{}]  {}  [{} -> {}]",
+                    mr.iid,
+                    mr_approval_status_label(mr.approved_by_me),
+                    mr.title,
+                    mr.source_branch,
+                    mr.target_branch
+                )
+            })
+            .collect();
+        let details: Vec<Vec<String>> = merge_requests
+            .iter()
+            .map(Self::open_mr_detail_lines)
+            .collect();
+
+        let mut menu = MenuState::new(
+            "gmux / 待合并 MR",
+            &format!("项目: {project_name}  [仅显示 opened]"),
+            items,
+        )
+        .with_details(details)
+        .with_search("输入标题、分支名、IID 或链接关键词")
+        .with_help(vec![
+            "这里只展示当前项目里 state=opened 的合并请求。".to_string(),
+            "按 / 可以按标题、源分支、目标分支、IID 或链接搜索。".to_string(),
+            "列表会顺手读取当前账号的审批状态，已审批的 MR 会标成 [已审批]。".to_string(),
+            "回车进入 MR 操作页后，已审批的 MR 会跳过重复审批，直接进入合并。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                match action {
+                    MenuAction::Select(i) => {
+                        return Ok(Some(GitLabMrListAction::Select(merge_requests[i].clone())));
+                    }
+                    MenuAction::Back => return Ok(Some(GitLabMrListAction::Back)),
+                    MenuAction::Quit => return Ok(Some(GitLabMrListAction::Quit)),
+                }
+            }
+        }
+    }
+
+    fn show_gitlab_mr_actions(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_name: &str,
+        mr: &MergeRequest,
+    ) -> Result<Option<GitLabMrAction>> {
+        let items = vec![
+            "审批并合并".to_string(),
+            "关闭 MR".to_string(),
+            "返回待合并列表".to_string(),
+        ];
+        let details = vec![
+            vec![
+                format!("项目: {project_name}"),
+                format!("MR: !{} {}", mr.iid, mr.title),
+                format!("分支: {} -> {}", mr.source_branch, mr.target_branch),
+                if mr.approved_by_me {
+                    "当前账号已审批过这条 MR，执行时会直接自动合并。".to_string()
+                } else {
+                    "当前账号尚未审批，执行时会先审批，再按当前策略自动合并。".to_string()
+                },
+            ],
+            vec![
+                format!("项目: {project_name}"),
+                format!("MR: !{} {}", mr.iid, mr.title),
+                "关闭后 MR 会保留记录，但不再处于待处理列表。".to_string(),
+            ],
+            vec!["返回上一页待合并列表。".to_string()],
+        ];
+
+        let mut menu = MenuState::new(
+            "gmux / MR 操作",
+            &format!(
+                "!{}  {}  [{} -> {}]",
+                mr.iid, mr.title, mr.source_branch, mr.target_branch
+            ),
+            items,
+        )
+        .with_details(details)
+        .with_help(vec![
+            "审批并合并会先检查当前账号是否已经审批过；如果已经审批，就直接进入合并。".to_string(),
+            "关闭 MR 会调用 GitLab 更新接口，将 merge request 标记为 closed。".to_string(),
+        ]);
+
+        loop {
+            terminal.draw(|f| menu.render(f))?;
+            if let Some(action) = menu.handle_key_event() {
+                return Ok(match action {
+                    MenuAction::Select(0) => Some(GitLabMrAction::ApproveAndMerge),
+                    MenuAction::Select(1) => Some(GitLabMrAction::Close),
+                    MenuAction::Select(2) => Some(GitLabMrAction::Back),
+                    MenuAction::Back => Some(GitLabMrAction::Back),
+                    MenuAction::Quit => Some(GitLabMrAction::Quit),
                     _ => None,
                 });
             }
@@ -3101,7 +3317,7 @@ impl App {
                 ];
                 if self.is_protected_target(target_branch) {
                     lines.push(format!(
-                        "- 目标分支 `{target_branch}` 命中保护策略，执行前会再次确认是否自动合并"
+                        "- 目标分支 `{target_branch}` 命中保护策略，创建并审批成功后会再次确认是否自动合并"
                     ));
                 } else {
                     lines.push(format!(
@@ -3363,6 +3579,19 @@ impl App {
             .collect();
         mappings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         mappings
+    }
+
+    fn open_mr_detail_lines(mr: &MergeRequest) -> Vec<String> {
+        vec![
+            format!("IID: !{}", mr.iid),
+            format!("标题: {}", mr.title),
+            format!("创建人: {} (@{})", mr.author.name, mr.author.username),
+            format!("我的审批: {}", mr_approval_status_label(mr.approved_by_me)),
+            format!("源分支: {}", mr.source_branch),
+            format!("目标分支: {}", mr.target_branch),
+            format!("状态: {}", mr.state),
+            format!("链接: {}", mr.web_url),
+        ]
     }
 
     fn batch_mr_mappings(&self) -> Vec<(String, String)> {
@@ -3673,11 +3902,7 @@ impl App {
     fn protected_targets_for_plan(&self, plan: &ExecutionPlan) -> Option<Vec<String>> {
         let protected_targets = &self.config.merge_policy.protected_targets;
         let mut matched = match plan {
-            ExecutionPlan::MrSingle { target_branch, .. } => protected_targets
-                .iter()
-                .filter(|branch| *branch == target_branch)
-                .cloned()
-                .collect::<Vec<_>>(),
+            ExecutionPlan::MrSingle { .. } => Vec::new(),
             ExecutionPlan::MrBatch { mappings, .. } => mappings
                 .iter()
                 .filter_map(|(_, target)| {
@@ -3777,19 +4002,39 @@ impl App {
                 match self.gitlab.approve_mr(project_id, mr.iid) {
                     Ok(()) => {
                         results.push((true, "MR 审批成功".to_string()));
-                        self.render_mr_progress(
-                            terminal,
-                            3,
-                            total_steps,
-                            &summary,
-                            &self.mr_merge_progress_detail(tgt, protected_merge_mode),
-                        )?;
+                        let effective_merge_mode = if self.is_protected_target(tgt) {
+                            self.render_mr_progress(
+                                terminal,
+                                3,
+                                total_steps,
+                                &summary,
+                                "等待确认是否自动合并保护分支",
+                            )?;
+                            match self.show_protected_merge_prompt(terminal, &[tgt.to_string()])? {
+                                Some(ProtectedMergePromptAction::MergeNow) => {
+                                    ProtectedMergeMode::Merge
+                                }
+                                Some(ProtectedMergePromptAction::SkipMerge)
+                                | Some(ProtectedMergePromptAction::Back)
+                                | Some(ProtectedMergePromptAction::Quit)
+                                | None => ProtectedMergeMode::Skip,
+                            }
+                        } else {
+                            self.render_mr_progress(
+                                terminal,
+                                3,
+                                total_steps,
+                                &summary,
+                                &self.mr_merge_progress_detail(tgt, protected_merge_mode),
+                            )?;
+                            protected_merge_mode
+                        };
                         results.extend(self.handle_mr_merge_policy(
                             project_id,
                             mr.iid,
                             src,
                             tgt,
-                            protected_merge_mode,
+                            effective_merge_mode,
                         ));
                     }
                     Err(e) => {
@@ -3824,6 +4069,129 @@ impl App {
         }
 
         Ok(results)
+    }
+
+    fn execute_existing_mr_approve_and_merge(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_id: u64,
+        mr: &MergeRequest,
+    ) -> Result<Vec<(bool, String)>> {
+        let mut results = Vec::new();
+        let total_steps = 2usize;
+        let summary = format!("!{} {} -> {}", mr.iid, mr.source_branch, mr.target_branch);
+
+        let already_approved = if mr.approved_by_me {
+            true
+        } else {
+            self.gitlab
+                .is_mr_approved_by_current_user(project_id, mr.iid)
+                .with_context(|| {
+                    format!(
+                        "刷新 MR 审批状态失败: !{} {} -> {}",
+                        mr.iid, mr.source_branch, mr.target_branch
+                    )
+                })?
+        };
+
+        if already_approved {
+            self.render_mr_progress(terminal, 1, total_steps, &summary, "检测到已审批，跳过审批")?;
+        } else {
+            self.render_mr_progress(terminal, 1, total_steps, &summary, "审批现有 MR")?;
+            match self.gitlab.approve_mr(project_id, mr.iid) {
+                Ok(()) => {
+                    results.push((
+                        true,
+                        format!(
+                            "MR 审批成功: !{} {} -> {}",
+                            mr.iid, mr.source_branch, mr.target_branch
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    let approved_after_error = self
+                        .gitlab
+                        .is_mr_approved_by_current_user(project_id, mr.iid)
+                        .with_context(|| {
+                            format!(
+                                "审批失败后再次确认 MR 审批状态失败: !{} {} -> {}",
+                                mr.iid, mr.source_branch, mr.target_branch
+                            )
+                        })?;
+
+                    if approved_after_error {
+                        results.push((
+                            true,
+                            format!(
+                                "MR 已审批，跳过重复审批: !{} {} -> {}",
+                                mr.iid, mr.source_branch, mr.target_branch
+                            ),
+                        ));
+                    } else {
+                        results.push((
+                            false,
+                            format!(
+                                "MR 审批失败: !{} {} -> {}: {e}",
+                                mr.iid, mr.source_branch, mr.target_branch
+                            ),
+                        ));
+                        self.render_mr_progress(
+                            terminal,
+                            2,
+                            total_steps,
+                            &summary,
+                            "跳过自动合并，因审批失败",
+                        )?;
+                        return Ok(results);
+                    }
+                }
+            }
+        }
+
+        self.render_mr_progress(
+            terminal,
+            2,
+            total_steps,
+            &summary,
+            &self.mr_merge_progress_detail(&mr.target_branch, ProtectedMergeMode::Merge),
+        )?;
+
+        results.extend(self.handle_mr_merge_policy(
+            project_id,
+            mr.iid,
+            &mr.source_branch,
+            &mr.target_branch,
+            ProtectedMergeMode::Merge,
+        ));
+        Ok(results)
+    }
+
+    fn execute_existing_mr_close(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        project_id: u64,
+        mr: &MergeRequest,
+    ) -> Result<Vec<(bool, String)>> {
+        let total_steps = 1usize;
+        let summary = format!("!{} {} -> {}", mr.iid, mr.source_branch, mr.target_branch);
+
+        self.render_mr_progress(terminal, 1, total_steps, &summary, "关闭现有 MR")?;
+        match self.gitlab.close_mr(project_id, mr.iid) {
+            Ok(()) => Ok(vec![(
+                true,
+                format!(
+                    "MR 已关闭: !{} {} -> {}",
+                    mr.iid, mr.source_branch, mr.target_branch
+                ),
+            )]),
+            Err(e) => Ok(vec![(
+                false,
+                format!(
+                    "关闭 MR 失败: !{} {} -> {}: {e}",
+                    mr.iid, mr.source_branch, mr.target_branch
+                ),
+            )]),
+        }
     }
 
     fn execute_mr_batch(
@@ -3999,6 +4367,14 @@ fn summarize_auto_merge_logs(
     vec![(true, message)]
 }
 
+fn mr_approval_status_label(approved_by_me: bool) -> &'static str {
+    if approved_by_me {
+        "已审批"
+    } else {
+        "未审批"
+    }
+}
+
 fn parse_merge_attempt(line: &str, suffix: &str) -> Option<u32> {
     let number = line.strip_prefix("第 ")?.strip_suffix(suffix)?.trim();
     number.parse().ok()
@@ -4006,7 +4382,10 @@ fn parse_merge_attempt(line: &str, suffix: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_batch_mr_mappings, parse_merge_attempt, summarize_auto_merge_logs};
+    use super::{
+        filter_batch_mr_mappings, mr_approval_status_label, parse_merge_attempt,
+        summarize_auto_merge_logs,
+    };
 
     #[test]
     fn batch_mr_excludes_protected_targets() {
@@ -4060,6 +4439,12 @@ mod tests {
             parse_merge_attempt("第 3 次合并成功", "次合并成功"),
             Some(3)
         );
+    }
+
+    #[test]
+    fn mr_approval_status_label_reports_both_states() {
+        assert_eq!(mr_approval_status_label(true), "已审批");
+        assert_eq!(mr_approval_status_label(false), "未审批");
     }
 }
 
@@ -4236,12 +4621,26 @@ enum MrMenuAction {
     Single,
     Batch,
     BatchCustom,
+    ListOpen,
     Back,
     Quit,
 }
 
 enum GitLabAction {
     Select(u64, String),
+    Back,
+    Quit,
+}
+
+enum GitLabMrListAction {
+    Select(MergeRequest),
+    Back,
+    Quit,
+}
+
+enum GitLabMrAction {
+    ApproveAndMerge,
+    Close,
     Back,
     Quit,
 }
