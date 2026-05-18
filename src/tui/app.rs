@@ -3077,28 +3077,23 @@ impl App {
         &self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<Option<BranchMapAction>> {
-        let mut keys: Vec<String> = self.config.branch_map.keys().cloned().collect();
-        keys.sort();
+        let mappings = self.mr_branch_map_entries();
 
-        let items: Vec<String> = keys
+        let items: Vec<String> = mappings
             .iter()
-            .map(|k| format!("{k} -> {}", self.config.branch_map[k]))
+            .map(|(src, tgt)| format!("{src} -> {tgt}"))
             .collect();
-        let details: Vec<Vec<String>> = keys
+        let details: Vec<Vec<String>> = mappings
             .iter()
-            .map(|k| {
-                vec![
-                    format!("源分支: {k}"),
-                    format!("目标分支: {}", self.config.branch_map[k]),
-                ]
-            })
+            .map(|(src, tgt)| vec![format!("源分支: {src}"), format!("目标分支: {tgt}")])
             .collect();
 
         let mut menu = MenuState::new("gmux / 分支映射", "选择源分支与目标分支的映射关系", items)
             .with_details(details)
             .with_search("输入源分支或目标分支关键词")
             .with_help(vec![
-                "这里使用配置文件中的 branch_map 定义源分支和目标分支关系。".to_string(),
+                "这里优先使用当前环境分支自动推导出的默认映射，并叠加 branch_map 里的自定义覆盖。"
+                    .to_string(),
                 "选择后会先进入 GitLab MR 执行预览，再决定是否真正创建。".to_string(),
                 "按 / 可以搜索源分支名或目标分支名。".to_string(),
             ]);
@@ -3108,8 +3103,7 @@ impl App {
             if let Some(action) = menu.handle_key_event() {
                 return Ok(match action {
                     MenuAction::Select(i) => {
-                        let src = keys[i].clone();
-                        let tgt = self.config.branch_map[&src].clone();
+                        let (src, tgt) = mappings[i].clone();
                         Some(BranchMapAction::Select(src, tgt))
                     }
                     MenuAction::Back => Some(BranchMapAction::Back),
@@ -3581,6 +3575,10 @@ impl App {
         mappings
     }
 
+    fn mr_branch_map_entries(&self) -> Vec<(String, String)> {
+        effective_mr_branch_mappings(&self.config)
+    }
+
     fn open_mr_detail_lines(mr: &MergeRequest) -> Vec<String> {
         vec![
             format!("IID: !{}", mr.iid),
@@ -3596,7 +3594,7 @@ impl App {
 
     fn batch_mr_mappings(&self) -> Vec<(String, String)> {
         filter_batch_mr_mappings(
-            self.branch_map_entries(),
+            self.mr_branch_map_entries(),
             &self.config.merge_policy.protected_targets,
         )
     }
@@ -3638,20 +3636,7 @@ impl App {
     }
 
     fn default_branch_map_entries(&self) -> Vec<(String, String)> {
-        let mut mappings: Vec<(String, String)> = self
-            .config
-            .project
-            .env_branches
-            .iter()
-            .map(|env| {
-                (
-                    format!("{}_{}_meger", env, self.config.project.merge_branch_middle),
-                    env.clone(),
-                )
-            })
-            .collect();
-        mappings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-        mappings
+        config_default_branch_map_entries(&self.config)
     }
 
     fn mask_token(token: &str) -> String {
@@ -4347,6 +4332,53 @@ fn filter_batch_mr_mappings(
         .collect()
 }
 
+fn effective_mr_branch_mappings(config: &Config) -> Vec<(String, String)> {
+    let current_defaults = config_default_branch_map_entries(config);
+    let env_branches = &config.project.env_branches;
+
+    let has_custom_mappings = config
+        .branch_map
+        .iter()
+        .any(|(src, tgt)| *src != default_branch_map_source(config, tgt));
+
+    if !has_custom_mappings {
+        return current_defaults;
+    }
+
+    let mut merged: std::collections::HashMap<String, String> =
+        current_defaults.into_iter().collect();
+
+    for (src, tgt) in &config.branch_map {
+        let is_default_like = *src == default_branch_map_source(config, tgt);
+        let target_is_current_env = env_branches.iter().any(|branch| branch == tgt);
+
+        if is_default_like && !target_is_current_env {
+            continue;
+        }
+
+        merged.insert(src.clone(), tgt.clone());
+    }
+
+    let mut mappings: Vec<(String, String)> = merged.into_iter().collect();
+    mappings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    mappings
+}
+
+fn config_default_branch_map_entries(config: &Config) -> Vec<(String, String)> {
+    let mut mappings: Vec<(String, String)> = config
+        .project
+        .env_branches
+        .iter()
+        .map(|env| (default_branch_map_source(config, env), env.clone()))
+        .collect();
+    mappings.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    mappings
+}
+
+fn default_branch_map_source(config: &Config, target: &str) -> String {
+    format!("{}_{}_meger", target, config.project.merge_branch_middle)
+}
+
 fn summarize_auto_merge_logs(
     source_branch: &str,
     target_branch: &str,
@@ -4383,9 +4415,32 @@ fn parse_merge_attempt(line: &str, suffix: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_batch_mr_mappings, mr_approval_status_label, parse_merge_attempt,
-        summarize_auto_merge_logs,
+        effective_mr_branch_mappings, filter_batch_mr_mappings, mr_approval_status_label,
+        parse_merge_attempt, summarize_auto_merge_logs,
     };
+    use crate::config::{Config, GitLabConfig, MergePolicyConfig, ProjectConfig};
+    use std::collections::HashMap;
+
+    fn sample_config() -> Config {
+        Config {
+            gitlab: GitLabConfig {
+                host: "https://gitlab.example.com".to_string(),
+                token: "token".to_string(),
+            },
+            project: ProjectConfig {
+                root_dirs: vec!["/tmp".to_string()],
+                merge_branch_middle: "henry".to_string(),
+                env_branches: vec![
+                    "test".to_string(),
+                    "uat".to_string(),
+                    "stage".to_string(),
+                    "pre_prod".to_string(),
+                ],
+            },
+            branch_map: HashMap::new(),
+            merge_policy: MergePolicyConfig::default(),
+        }
+    }
 
     #[test]
     fn batch_mr_excludes_protected_targets() {
@@ -4445,6 +4500,38 @@ mod tests {
     fn mr_approval_status_label_reports_both_states() {
         assert_eq!(mr_approval_status_label(true), "已审批");
         assert_eq!(mr_approval_status_label(false), "未审批");
+    }
+
+    #[test]
+    fn effective_mr_branch_mappings_follow_new_env_branches() {
+        let mut config = sample_config();
+        config.branch_map = HashMap::from([
+            ("test_henry_meger".to_string(), "test".to_string()),
+            ("uat_henry_meger".to_string(), "uat".to_string()),
+            ("stage_henry_meger".to_string(), "stage".to_string()),
+            ("pre_prod_henry_meger".to_string(), "pre_prod".to_string()),
+        ]);
+        config.project.env_branches.push("prod".to_string());
+
+        let mappings = effective_mr_branch_mappings(&config);
+
+        assert!(mappings.contains(&("prod_henry_meger".to_string(), "prod".to_string())));
+    }
+
+    #[test]
+    fn effective_mr_branch_mappings_drop_stale_default_entries() {
+        let mut config = sample_config();
+        config.project.env_branches = vec!["test".to_string(), "prod".to_string()];
+        config.branch_map = HashMap::from([
+            ("test_henry_meger".to_string(), "test".to_string()),
+            ("uat_henry_meger".to_string(), "uat".to_string()),
+            ("prod_henry_meger".to_string(), "prod".to_string()),
+        ]);
+
+        let mappings = effective_mr_branch_mappings(&config);
+
+        assert!(mappings.contains(&("prod_henry_meger".to_string(), "prod".to_string())));
+        assert!(!mappings.contains(&("uat_henry_meger".to_string(), "uat".to_string())));
     }
 }
 
